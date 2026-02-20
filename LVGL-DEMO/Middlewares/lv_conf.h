@@ -633,7 +633,7 @@
 /* Montserrat fonts with ASCII range and some symbols using bpp = 4
  * https://fonts.google.com/specimen/Montserrat */
 #define LV_FONT_MONTSERRAT_8  0
-#define LV_FONT_MONTSERRAT_10 0
+#define LV_FONT_MONTSERRAT_10 1
 #define LV_FONT_MONTSERRAT_12 0
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 0
@@ -779,7 +779,7 @@
 
 #define LV_USE_CANVAS     1
 
-#define LV_USE_CHART      0
+#define LV_USE_CHART      1
 
 #define LV_USE_CHECKBOX   1
 
@@ -812,7 +812,7 @@
 
 #define LV_USE_ROLLER     0   /**< Requires: lv_label */
 
-#define LV_USE_SCALE      0
+#define LV_USE_SCALE      1
 
 #define LV_USE_SLIDER     1   /**< Requires: lv_bar */
 
@@ -873,7 +873,7 @@
 /* Documentation for layouts can be found here: https://docs.lvgl.io/master/common-widget-features/layouts/index.html . */
 
 /** A layout similar to Flexbox in CSS. */
-#define LV_USE_FLEX 0
+#define LV_USE_FLEX 1
 
 /** A layout similar to Grid in CSS. */
 #define LV_USE_GRID 0
