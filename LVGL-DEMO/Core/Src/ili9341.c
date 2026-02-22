@@ -224,7 +224,7 @@ void ILI9341_Init(void)
 	LCD_WR_REG(0x29);
 	LCD_WR_DATA(0x2C);
 
-	LCD_direction(ROTATE_270);
+	LCD_direction(ROTATE_0);
 
 }
 

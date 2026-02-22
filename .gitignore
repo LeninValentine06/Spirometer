@@ -2,7 +2,10 @@ Docs/.obsidian/
 # STM32CubeIDE
 .settings/
 Debug/
-*.launch
+Release/
+build/
+*.log
+.settings/
 
 # Build artifacts (extra safety)
 *.elf
