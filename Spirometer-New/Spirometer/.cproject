@@ -169,15 +169,6 @@
 		<project id="Spirometer.null.1394726265" name="Spirometer"/>
 	</storageModule>
 	<storageModule moduleId="org.eclipse.cdt.core.LanguageSettingsProviders"/>
-	<storageModule moduleId="scannerConfiguration">
-		<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
-		<scannerConfigBuildInfo instanceId="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1350525411;com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1350525411.;com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.1061660275;com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.973134603">
-			<autodiscovery enabled="false" problemReportingEnabled="true" selectedProfileId=""/>
-		</scannerConfigBuildInfo>
-		<scannerConfigBuildInfo instanceId="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.release.2100432004;com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.release.2100432004.;com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.224130436;com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.2122581875">
-			<autodiscovery enabled="false" problemReportingEnabled="true" selectedProfileId=""/>
-		</scannerConfigBuildInfo>
-	</storageModule>
 	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
 	<storageModule moduleId="refreshScope" versionNumber="2">
 		<configuration configurationName="Debug">
@@ -187,4 +178,5 @@
 			<resource resourceType="PROJECT" workspacePath="/Spirometer"/>
 		</configuration>
 	</storageModule>
+	<storageModule moduleId="scannerConfiguration"/>
 </cproject>

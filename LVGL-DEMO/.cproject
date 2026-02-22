@@ -82,7 +82,7 @@
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
 						<entry excluding="src/drivers/nuttx|src/draw/renesas|src/draw/nxp" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Middlewares/LVGL"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/LVGL"/>
+						<entry excluding="src/drivers/opengles|src/drivers/nuttx|src/drivers/sdl|src/drivers/uefi|src/drivers/windows|src/drivers/wayland|src/drivers/qnx|src/xml" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/LVGL"/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>
@@ -160,7 +160,7 @@
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
 						<entry excluding="src/drivers/nuttx|src/draw/renesas|src/draw/nxp" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Middlewares/LVGL"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/LVGL"/>
+						<entry excluding="src/drivers/opengles|src/drivers/nuttx|src/drivers/sdl|src/drivers/uefi|src/drivers/windows|src/drivers/wayland|src/drivers/qnx|src/xml" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="ThirdParty/LVGL"/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>
