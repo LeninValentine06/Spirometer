@@ -447,10 +447,16 @@ void create_screen_scr_home(void) {
             lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_radius(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+            /* Allow fvl_chart (which sits at y=-12) to render outside this
+               container without being clipped. Without this flag LVGL would
+               allocate an intermediate compositing layer for the overflow
+               region, which exhausts the 32 KB heap and produces a mosaic. */
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
             {
                 lv_obj_t *parent_obj = obj;
 
-                /* Plain container used as the FVL drawing canvas */
+                /* FVL drawing canvas — NO children so LVGL draws it directly
+                   into the framebuffer without any intermediate layer. */
                 {
                     lv_obj_t *obj = lv_obj_create(parent_obj);
                     objects.fvl_chart = obj;
@@ -462,17 +468,19 @@ void create_screen_scr_home(void) {
                     lv_obj_set_style_radius(obj, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+                    lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
                     add_style_f_v(obj);
+                }
 
-                    /* "Blow to see graph" wait label centred inside the chart */
-                    {
-                        lv_obj_t *lbl = lv_label_create(obj);
-                        objects.fvl_wait_lbl = lbl;
-                        lv_label_set_text(lbl, "Blow to see graph");
-                        lv_obj_set_size(lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
-                        add_style_style_dim_label(lbl);
-                    }
+                /* "Blow to see graph" — sibling of fvl_chart, NOT a child,
+                   so fvl_chart remains child-free (no intermediate layer). */
+                {
+                    lv_obj_t *lbl = lv_label_create(parent_obj);
+                    objects.fvl_wait_lbl = lbl;
+                    lv_label_set_text(lbl, "Blow to see graph");
+                    lv_obj_set_size(lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+                    lv_obj_set_pos(lbl, 72, 30);
+                    add_style_style_dim_label(lbl);
                 }
 
                 /* Y-axis labels (top → bottom: 10, 7, 4, 1  L/s) */
@@ -635,7 +643,8 @@ void create_screen_history(void) {
     {
         lv_obj_t *parent_obj = obj;
 
-        /* Volume-Time chart placeholder */
+        /* Volume-Time chart — no children, OVERFLOW_VISIBLE so it can
+           render without an intermediate layer. */
         {
             lv_obj_t *obj = lv_obj_create(parent_obj);
             objects.vt_chart = obj;
@@ -647,15 +656,17 @@ void create_screen_history(void) {
             lv_obj_set_style_radius(obj, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        }
 
-            {
-                lv_obj_t *lbl = lv_label_create(obj);
-                objects.vt_wait_lbl = lbl;
-                lv_label_set_text(lbl, "Blow to see graph");
-                lv_obj_set_size(lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
-                add_style_style_dim_label(lbl);
-            }
+        /* Wait label as sibling of vt_chart (not child) */
+        {
+            lv_obj_t *lbl = lv_label_create(parent_obj);
+            objects.vt_wait_lbl = lbl;
+            lv_label_set_text(lbl, "Blow to see graph");
+            lv_obj_set_size(lbl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_pos(lbl, 72, 82);
+            add_style_style_dim_label(lbl);
         }
 
         /* VT Y-axis labels */
