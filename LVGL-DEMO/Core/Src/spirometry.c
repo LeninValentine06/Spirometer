@@ -2,24 +2,11 @@
  * spirometry.c
  *
  * Spirometry engine: acquisition → computation → GUI update.
- *
- * Designed for STM32 + LVGL 9.x, 240×320 display.
- * The engine is entirely poll-driven; no RTOS required.
- *
- * Integration checklist
- * ─────────────────────
- *  1. Add spirometry.c / spirometry.h to your IDE project.
- *  2. In main.c call spiro_init() once after ui_init().
- *  3. In main.c while(1) loop call spiro_process() after lv_timer_handler().
- *  4. If you use DMA continuous conversion, call spiro_push_sample() from
- *     your HAL_ADC_ConvCpltCallback / HAL_ADC_ConvHalfCpltCallback.
- *     Alternatively, leave the ADC calls in spiro_process() (polling mode —
- *     default in this file; see poll_adc_sample()).
- *  5. Adjust the #defines in spirometry.h for your sensor calibration.
+ * Draw callbacks inspired by the full main.c reference implementation.
  */
 
 #include "spirometry.h"
-#include "ui/screens.h"   /* objects_t objects  */
+#include "ui/screens.h"
 
 #include "stm32f4xx_hal.h"
 #include "adc.h"
@@ -29,159 +16,243 @@
 #include <math.h>
 
 /* ── Forward declarations ───────────────────────────────────────────────── */
-static void  do_compute(void);
-static void  gui_update_metrics(void);
-static void  gui_update_fvl_graph(void);
-static void  gui_update_vt_graph(void);
-static void  gui_reset_display(void);
-static float compute_fef_at_volume_fraction(float fraction, float fvc);
+static void     do_compute(void);
+static void     gui_update_metrics(void);
+static void     gui_update_fvl_graph(void);
+static void     gui_update_vt_graph(void);
+static void     gui_reset_display(void);
+static float    compute_fef_at_volume_fraction(float fraction, float fvc);
 static uint16_t poll_adc_sample(void);
 
-/* ── Internal state ─────────────────────────────────────────────────────── */
+/* ── Sample buffers ─────────────────────────────────────────────────────── */
+static uint16_t s_raw[SPIRO_BUF_MAX_SAMPLES];
+static float    s_vol[SPIRO_BUF_MAX_SAMPLES];
 
-/* Static sample buffers — one maneuver at a time.
- * raw ADC uint16_t  × 1232 = 2464 bytes
- * volume  float     × 1232 = 4928 bytes
- * Total BSS                = 7392 bytes (~7.2 KB)               */
-static uint16_t s_raw[SPIRO_BUF_MAX_SAMPLES];   /* raw ADC counts          */
-static float    s_vol[SPIRO_BUF_MAX_SAMPLES];   /* integrated volume (L)   */
-
-/* Inline helper: ADC count -> flow in L/s */
 static inline float raw_to_lps(uint16_t raw)
 {
     int32_t delta = (int32_t)raw - (int32_t)SPIRO_ZERO_COUNTS;
-    if (delta < 0) delta = 0;   /* clamp negative (below zero-flow) */
+    if (delta < 0) delta = 0;
     return (float)delta / SPIRO_COUNTS_PER_LPS;
 }
 
-static uint32_t      s_n          = 0;        /* samples filled   */
+static uint32_t      s_n          = 0;
 static spiro_state_t s_state      = SPIRO_STATE_IDLE;
 static spiro_result_t s_result;
 static bool          s_has_result = false;
 
-/* Maneuver timing */
-static uint32_t s_start_tick = 0;   /* HAL_GetTick() at first sample   */
-static uint32_t s_quiet_since = 0;  /* HAL_GetTick() when flow fell low */
+static uint32_t s_start_tick  = 0;
+static uint32_t s_quiet_since = 0;
 static bool     s_in_quiet    = false;
 static bool     s_saturated   = false;
 
-/* dt between samples */
 #define DT_S  (1.0f / (float)SPIRO_ADC_FS_HZ)
+
+/* ── Axis scale state (set by gui_update_*_graph, read by draw callbacks) ─ */
+/* FVL: volume axis 0..fvl_x_max_ml mL, flow axis 0..fvl_y_max_mlps mL/s   */
+static int32_t fvl_x_max_ml   = 1000;   /* default 1 L   */
+static int32_t fvl_y_max_mlps = 2000;   /* default 2 L/s */
+
+/* VT: time axis 0..vt_t_max_ms ms, volume axis 0..vt_v_max_ml mL           */
+static int32_t vt_t_max_ms = 6000;
+static int32_t vt_v_max_ml = 1000;
 
 /* ── FVL draw-post callback ─────────────────────────────────────────────── */
 /*
- * LVGL calls this after every redraw of fvl_chart.
- * We draw the flow-volume curve on top of the background.
+ * Draws directly into the LVGL strip buffer — no intermediate layer.
+ * Inspired by the reference main.c fvl_draw_cb:
+ *   - light grid lines
+ *   - green flow-volume curve
+ *   - yellow dot at PEF
  */
 static void fvl_draw_cb(lv_event_t *e)
 {
-    if (!s_has_result) return;
-
     lv_obj_t   *obj   = lv_event_get_target(e);
-    lv_layer_t *layer = lv_event_get_layer(e);   /* LVGL 9 */
+    lv_layer_t *layer = lv_event_get_layer(e);
 
-    lv_area_t obj_area;
-    lv_obj_get_coords(obj, &obj_area);
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    int32_t ox = coords.x1;
+    int32_t oy = coords.y1;
+    int32_t W  = coords.x2 - coords.x1;
+    int32_t H  = coords.y2 - coords.y1;
 
-    int32_t w = lv_obj_get_width(obj);
-    int32_t h = lv_obj_get_height(obj);
+    /* ── Grid lines ── */
+    lv_draw_line_dsc_t gdsc;
+    lv_draw_line_dsc_init(&gdsc);
+    gdsc.color       = lv_color_hex(0x1e2a40);
+    gdsc.width       = 1;
+    gdsc.round_start = 0;
+    gdsc.round_end   = 0;
+    for (int g = 1; g <= 3; g++) {
+        gdsc.p1.x = ox;     gdsc.p1.y = oy + (H * g) / 4;
+        gdsc.p2.x = ox + W; gdsc.p2.y = oy + (H * g) / 4;
+        lv_draw_line(layer, &gdsc);
+        gdsc.p1.x = ox + (W * g) / 4; gdsc.p1.y = oy;
+        gdsc.p2.x = ox + (W * g) / 4; gdsc.p2.y = oy + H;
+        lv_draw_line(layer, &gdsc);
+    }
 
-    /* Map flow/volume sample → pixel */
-    #define VOL_TO_X(v)  (obj_area.x1 + (int32_t)((v) / SPIRO_FVL_XMAX_L  * w))
-    #define FLW_TO_Y(f)  (obj_area.y2 - (int32_t)((f) / SPIRO_FVL_YMAX_LPS * h))
+    if (!s_has_result || s_result.n_samples < 2) return;
 
-    bool first = true;
-    lv_point_precise_t prev = {0, 0};
+    /* ── Flow-Volume curve with EMA smoothing ──
+     *
+     * Two-pass approach:
+     *  1. EMA (alpha=0.15) forward pass on flow values removes high-freq noise
+     *     while preserving the overall curve shape and PEF peak.
+     *  2. Plot every STEP-th smoothed sample — limits segments to ~canvas width.
+     *
+     * EMA: fl_smooth = alpha*fl_raw + (1-alpha)*fl_smooth_prev
+     * alpha=0.15 => strong smoothing; the FS1015 has an 8ms response so this
+     * is well-matched (at 200Hz, 8ms = 1.6 samples — EMA tau >> sensor tau).
+     */
+    #define FVL_EMA_ALPHA  0.15f
+    #define FVL_STEP       4
 
-    for (uint32_t i = 0; i < s_result.n_samples; i++) {
-        float fl = raw_to_lps(s_result.raw_buf[i]);
+    lv_draw_line_dsc_t ldsc;
+    lv_draw_line_dsc_init(&ldsc);
+    ldsc.color       = lv_color_hex(0x00E5A0);
+    ldsc.width       = 2;
+    ldsc.round_start = 1;
+    ldsc.round_end   = 1;
+
+    bool    first  = true;
+    int32_t px0 = 0, py0 = 0;
+    float   fl_ema = 0.0f;           /* EMA state */
+    uint32_t peak_i = 0;
+    float    peak_f_ema = 0.0f;      /* EMA'd peak for PEF dot */
+
+    uint32_t n = s_result.n_samples;
+    for (uint32_t i = 0; i < n; i++) {
+        float fl_raw = raw_to_lps(s_result.raw_buf[i]);
+        if (fl_raw < 0.0f) fl_raw = 0.0f;
+
+        /* EMA forward pass */
+        if (i == 0) fl_ema = fl_raw;
+        else        fl_ema = FVL_EMA_ALPHA * fl_raw + (1.0f - FVL_EMA_ALPHA) * fl_ema;
+
+        /* Track EMA peak for PEF dot position */
+        if (fl_ema > peak_f_ema) { peak_f_ema = fl_ema; peak_i = i; }
+
+        /* Only draw every STEP-th point to limit line segment count */
+        if (i % FVL_STEP != 0 && i != n-1) continue;
+
         float vl = s_result.vol_buf[i];
-        if (fl < 0.0f) fl = 0.0f;     /* expiratory portion only */
         if (vl < 0.0f) vl = 0.0f;
 
-        lv_point_precise_t pt = {
-            .x = VOL_TO_X(vl),
-            .y = FLW_TO_Y(fl)
-        };
-
-        /* clamp to object bounds */
-        if (pt.x < obj_area.x1) pt.x = obj_area.x1;
-        if (pt.x > obj_area.x2) pt.x = obj_area.x2;
-        if (pt.y < obj_area.y1) pt.y = obj_area.y1;
-        if (pt.y > obj_area.y2) pt.y = obj_area.y2;
+        int32_t px1 = ox + (int32_t)((vl    * 1000.0f * W) / fvl_x_max_ml);
+        int32_t py1 = oy + H - (int32_t)((fl_ema * 1000.0f * H) / fvl_y_max_mlps);
+        if (px1 < ox) px1 = ox; else if (px1 > ox+W) px1 = ox+W;
+        if (py1 < oy) py1 = oy; else if (py1 > oy+H) py1 = oy+H;
 
         if (!first) {
-            /* LVGL 9: points live inside lv_draw_line_dsc_t */
-            lv_draw_line_dsc_t line_dsc;
-            lv_draw_line_dsc_init(&line_dsc);
-            line_dsc.color       = lv_color_hex(0x00E5A0);  /* green */
-            line_dsc.width       = 2;
-            line_dsc.round_start = 1;
-            line_dsc.round_end   = 1;
-            line_dsc.p1          = prev;
-            line_dsc.p2          = pt;
-            lv_draw_line(layer, &line_dsc);
+            ldsc.p1.x = px0; ldsc.p1.y = py0;
+            ldsc.p2.x = px1; ldsc.p2.y = py1;
+            lv_draw_line(layer, &ldsc);
         }
-        prev  = pt;
+        px0 = px1; py0 = py1;
         first = false;
     }
-    #undef VOL_TO_X
-    #undef FLW_TO_Y
+    #undef FVL_EMA_ALPHA
+    #undef FVL_STEP
+
+    /* ── PEF dot at the EMA-smoothed peak ── */
+    if (peak_f_ema > 0.0f) {
+        float pvl = s_result.vol_buf[peak_i];
+        if (pvl < 0.0f) pvl = 0.0f;
+        int32_t px = ox + (int32_t)((pvl        * 1000.0f * W) / fvl_x_max_ml);
+        int32_t py = oy + H - (int32_t)((peak_f_ema * 1000.0f * H) / fvl_y_max_mlps);
+        if (px < ox) px = ox; else if (px > ox+W) px = ox+W;
+        if (py < oy) py = oy; else if (py > oy+H) py = oy+H;
+
+        lv_draw_rect_dsc_t rdsc;
+        lv_draw_rect_dsc_init(&rdsc);
+        rdsc.bg_color = lv_color_hex(0xFFB020);
+        rdsc.bg_opa   = LV_OPA_COVER;
+        rdsc.radius   = LV_RADIUS_CIRCLE;
+        lv_area_t dot = { px-3, py-3, px+3, py+3 };
+        lv_draw_rect(layer, &rdsc, &dot);
+    }
 }
 
+
 /* ── VT draw-post callback ──────────────────────────────────────────────── */
+/*
+ * Inspired by the reference main.c vt_draw_cb:
+ *   - light grid lines
+ *   - cyan volume-time curve
+ */
 static void vt_draw_cb(lv_event_t *e)
 {
-    if (!s_has_result) return;
-
     lv_obj_t   *obj   = lv_event_get_target(e);
-    lv_layer_t *layer = lv_event_get_layer(e);   /* LVGL 9 */
+    lv_layer_t *layer = lv_event_get_layer(e);
 
-    lv_area_t obj_area;
-    lv_obj_get_coords(obj, &obj_area);
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    int32_t ox = coords.x1;
+    int32_t oy = coords.y1;
+    int32_t W  = coords.x2 - coords.x1;
+    int32_t H  = coords.y2 - coords.y1;
 
-    int32_t w = lv_obj_get_width(obj);
-    int32_t h = lv_obj_get_height(obj);
+    /* ── Grid lines ── */
+    lv_draw_line_dsc_t gdsc;
+    lv_draw_line_dsc_init(&gdsc);
+    gdsc.color       = lv_color_hex(0x1e2a40);
+    gdsc.width       = 1;
+    gdsc.round_start = 0;
+    gdsc.round_end   = 0;
+    for (int g = 1; g <= 3; g++) {
+        gdsc.p1.x = ox;     gdsc.p1.y = oy + (H * g) / 4;
+        gdsc.p2.x = ox + W; gdsc.p2.y = oy + (H * g) / 4;
+        lv_draw_line(layer, &gdsc);
+        gdsc.p1.x = ox + (W * g) / 4; gdsc.p1.y = oy;
+        gdsc.p2.x = ox + (W * g) / 4; gdsc.p2.y = oy + H;
+        lv_draw_line(layer, &gdsc);
+    }
 
-    float t_max = (float)s_result.duration_ms / 1000.0f;
-    if (t_max < 0.1f) return;
+    if (!s_has_result || s_result.n_samples < 2) return;
 
-    #define TIME_TO_X(t)  (obj_area.x1 + (int32_t)((t) / SPIRO_VT_XMAX_S * w))
-    #define VOL_TO_Y(v)   (obj_area.y2 - (int32_t)((v) / SPIRO_VT_YMAX_L  * h))
+    /* ── Volume-Time curve with EMA smoothing ──
+     * Volume is already integrated so it's inherently smoother than flow,
+     * but we still apply a light EMA (alpha=0.3) and plot every 4th point. */
+    lv_draw_line_dsc_t ldsc;
+    lv_draw_line_dsc_init(&ldsc);
+    ldsc.color       = lv_color_hex(0x00D4FF);
+    ldsc.width       = 2;
+    ldsc.round_start = 1;
+    ldsc.round_end   = 1;
 
-    bool first = true;
-    lv_point_precise_t prev = {0, 0};
+    #define VT_EMA_ALPHA  0.3f
+    #define VT_STEP       4
+    bool    first  = true;
+    int32_t px0 = 0, py0 = 0;
+    float   vl_ema = 0.0f;
+    uint32_t n = s_result.n_samples;
 
-    for (uint32_t i = 0; i < s_result.n_samples; i++) {
-        float t  = (float)i * DT_S;
-        float vl = s_result.vol_buf[i];
-        if (vl < 0.0f) vl = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        float vl_raw = s_result.vol_buf[i];
+        if (vl_raw < 0.0f) vl_raw = 0.0f;
 
-        lv_point_precise_t pt = {
-            .x = TIME_TO_X(t),
-            .y = VOL_TO_Y(vl)
-        };
-        if (pt.x < obj_area.x1) pt.x = obj_area.x1;
-        if (pt.x > obj_area.x2) pt.x = obj_area.x2;
-        if (pt.y < obj_area.y1) pt.y = obj_area.y1;
-        if (pt.y > obj_area.y2) pt.y = obj_area.y2;
+        if (i == 0) vl_ema = vl_raw;
+        else        vl_ema = VT_EMA_ALPHA * vl_raw + (1.0f - VT_EMA_ALPHA) * vl_ema;
+
+        if (i % VT_STEP != 0 && i != n-1) continue;
+
+        int32_t t_ms = (int32_t)(i * (uint32_t)(DT_S * 1000.0f));
+        int32_t px1 = ox + (t_ms * W) / vt_t_max_ms;
+        int32_t py1 = oy + H - (int32_t)((vl_ema * 1000.0f * H) / vt_v_max_ml);
+        if (px1 < ox) px1 = ox; else if (px1 > ox+W) px1 = ox+W;
+        if (py1 < oy) py1 = oy; else if (py1 > oy+H) py1 = oy+H;
 
         if (!first) {
-            lv_draw_line_dsc_t line_dsc;
-            lv_draw_line_dsc_init(&line_dsc);
-            line_dsc.color       = lv_color_hex(0x00D4FF);  /* cyan */
-            line_dsc.width       = 2;
-            line_dsc.round_start = 1;
-            line_dsc.round_end   = 1;
-            line_dsc.p1          = prev;
-            line_dsc.p2          = pt;
-            lv_draw_line(layer, &line_dsc);
+            ldsc.p1.x = px0; ldsc.p1.y = py0;
+            ldsc.p2.x = px1; ldsc.p2.y = py1;
+            lv_draw_line(layer, &ldsc);
         }
-        prev  = pt;
+        px0 = px1; py0 = py1;
         first = false;
     }
-    #undef TIME_TO_X
-    #undef VOL_TO_Y
+    #undef VT_EMA_ALPHA
+    #undef VT_STEP
 }
 
 /* ── spiro_init ─────────────────────────────────────────────────────────── */
@@ -192,15 +263,10 @@ void spiro_init(void)
     s_has_result = false;
     s_n          = 0;
 
-    /* Register draw callbacks on the chart containers */
-    if (objects.fvl_chart) {
-        lv_obj_add_event_cb(objects.fvl_chart, fvl_draw_cb,
-                            LV_EVENT_DRAW_POST, NULL);
-    }
-    if (objects.vt_chart) {
-        lv_obj_add_event_cb(objects.vt_chart, vt_draw_cb,
-                            LV_EVENT_DRAW_POST, NULL);
-    }
+    if (objects.fvl_chart)
+        lv_obj_add_event_cb(objects.fvl_chart, fvl_draw_cb, LV_EVENT_DRAW_POST, NULL);
+    if (objects.vt_chart)
+        lv_obj_add_event_cb(objects.vt_chart, vt_draw_cb, LV_EVENT_DRAW_POST, NULL);
 
     gui_reset_display();
 }
@@ -216,26 +282,19 @@ void spiro_reset(void)
     gui_reset_display();
 }
 
-/* ── spiro_get_result / spiro_get_state ─────────────────────────────────── */
 const spiro_result_t *spiro_get_result(void)
 {
     return s_has_result ? &s_result : NULL;
 }
-
 spiro_state_t spiro_get_state(void) { return s_state; }
 
-/* ── poll_adc_sample ────────────────────────────────────────────────────── */
-/*
- * Blocking single-conversion poll.
- * Replace with your DMA path if preferred.
- * hadc1 must already be initialised by MX_ADC1_Init().
- */
+/* ── ADC polling ────────────────────────────────────────────────────────── */
 extern ADC_HandleTypeDef hadc1;
 
 static uint16_t poll_adc_sample(void)
 {
     HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 2);   /* 2 ms timeout */
+    HAL_ADC_PollForConversion(&hadc1, 2);
     uint16_t raw = (uint16_t)HAL_ADC_GetValue(&hadc1);
     HAL_ADC_Stop(&hadc1);
     return raw;
@@ -244,12 +303,9 @@ static uint16_t poll_adc_sample(void)
 bool spiro_push_sample(uint16_t adc_raw)
 {
     if (s_n >= SPIRO_BUF_MAX_SAMPLES) return false;
-
     if (adc_raw >= SPIRO_ADC_MAX) s_saturated = true;
-
     float flow = raw_to_lps(adc_raw);
-    float vol  = (s_n > 0) ? s_vol[s_n - 1] + flow * DT_S : 0.0f;
-
+    float vol  = (s_n > 0) ? s_vol[s_n-1] + flow * DT_S : 0.0f;
     s_raw[s_n] = adc_raw;
     s_vol[s_n] = vol;
     s_n++;
@@ -266,20 +322,12 @@ void spiro_process(void)
     case SPIRO_STATE_IDLE: {
         uint16_t raw  = poll_adc_sample();
         float    flow = raw_to_lps(raw);
-
         if (flow >= SPIRO_BLOW_THRESH_LPS) {
-            s_n          = 0;
-            s_saturated  = false;
-            s_in_quiet   = false;
-            s_has_result = false;
+            s_n=0; s_saturated=false; s_in_quiet=false; s_has_result=false;
             s_start_tick = now;
-            s_state      = SPIRO_STATE_ACQUIRING;
-
-            if (objects.fvl_wait_lbl)
-                lv_obj_add_flag(objects.fvl_wait_lbl, LV_OBJ_FLAG_HIDDEN);
-            if (objects.vt_wait_lbl)
-                lv_obj_add_flag(objects.vt_wait_lbl, LV_OBJ_FLAG_HIDDEN);
-
+            s_state = SPIRO_STATE_ACQUIRING;
+            if (objects.fvl_wait_lbl) lv_obj_add_flag(objects.fvl_wait_lbl, LV_OBJ_FLAG_HIDDEN);
+            if (objects.vt_wait_lbl)  lv_obj_add_flag(objects.vt_wait_lbl,  LV_OBJ_FLAG_HIDDEN);
             spiro_push_sample(raw);
         }
         break;
@@ -288,7 +336,6 @@ void spiro_process(void)
     case SPIRO_STATE_ACQUIRING: {
         uint16_t raw  = poll_adc_sample();
         spiro_push_sample(raw);
-
         float    flow    = raw_to_lps(raw);
         uint32_t elapsed = now - s_start_tick;
 
@@ -296,14 +343,10 @@ void spiro_process(void)
             s_state = SPIRO_STATE_COMPUTING;
             break;
         }
-
         if (flow < SPIRO_END_THRESH_LPS) {
-            if (!s_in_quiet) {
-                s_in_quiet    = true;
-                s_quiet_since = now;
-            } else if ((now - s_quiet_since) >= SPIRO_END_QUIET_MS) {
+            if (!s_in_quiet) { s_in_quiet=true; s_quiet_since=now; }
+            else if ((now - s_quiet_since) >= SPIRO_END_QUIET_MS)
                 s_state = SPIRO_STATE_COMPUTING;
-            }
         } else {
             s_in_quiet = false;
         }
@@ -322,20 +365,14 @@ void spiro_process(void)
         uint16_t raw  = poll_adc_sample();
         float    flow = raw_to_lps(raw);
         if (flow >= SPIRO_BLOW_THRESH_LPS) {
-            s_n          = 0;
-            s_saturated  = false;
-            s_in_quiet   = false;
-            s_has_result = false;
-            s_start_tick = now;
-            s_state      = SPIRO_STATE_ACQUIRING;
+            s_n=0; s_saturated=false; s_in_quiet=false; s_has_result=false;
+            s_start_tick=now; s_state=SPIRO_STATE_ACQUIRING;
             spiro_push_sample(raw);
         }
         break;
     }
 
-    default:
-        s_state = SPIRO_STATE_IDLE;
-        break;
+    default: s_state = SPIRO_STATE_IDLE; break;
     }
 }
 
@@ -346,22 +383,19 @@ static void do_compute(void)
 
     uint32_t duration_ms = (uint32_t)(s_n * 1000u / SPIRO_ADC_FS_HZ);
 
-    /* ── FVC: total exhaled volume (sum positive flow * dt) ── */
     float fvc = 0.0f;
     for (uint32_t i = 0; i < s_n; i++) {
         float fl = raw_to_lps(s_raw[i]);
         if (fl > 0.0f) fvc += fl * DT_S;
     }
 
-    /* ── PEF: maximum instantaneous flow ── */
-    float    pef     = 0.0f;
+    float pef = 0.0f;
     uint32_t pef_idx = 0;
     for (uint32_t i = 0; i < s_n; i++) {
         float fl = raw_to_lps(s_raw[i]);
         if (fl > pef) { pef = fl; pef_idx = i; }
     }
 
-    /* ── FEV1: volume exhaled in first 1 s ── */
     uint32_t fev1_samples = SPIRO_ADC_FS_HZ;
     if (fev1_samples > s_n) fev1_samples = s_n;
     float fev1 = 0.0f;
@@ -373,30 +407,25 @@ static void do_compute(void)
     float ratio = (fvc > 0.01f) ? (fev1 / fvc * 100.0f) : 0.0f;
     float tpef  = (float)pef_idx * DT_S;
 
-    /* ── Te: last sample index with flow above end threshold ── */
     uint32_t te_idx = 0;
-    for (uint32_t i = 0; i < s_n; i++) {
+    for (uint32_t i = 0; i < s_n; i++)
         if (raw_to_lps(s_raw[i]) > SPIRO_END_THRESH_LPS) te_idx = i;
-    }
     float te = (float)(te_idx + 1) * DT_S;
 
-    /* ── FEF25-75: mean flow between 25% and 75% of FVC ── */
     float fef2575 = 0.0f;
     {
-        float    v25 = 0.25f * fvc, v75 = 0.75f * fvc;
-        uint32_t i25 = 0, i75 = 0;
-        for (uint32_t i = 0; i < s_n; i++) {
-            if (s_vol[i] <= v25) i25 = i;
-            if (s_vol[i] <= v75) i75 = i;
+        float v25=0.25f*fvc, v75=0.75f*fvc;
+        uint32_t i25=0, i75=0;
+        for (uint32_t i=0;i<s_n;i++){
+            if (s_vol[i]<=v25) i25=i;
+            if (s_vol[i]<=v75) i75=i;
         }
-        if (i75 > i25) {
-            float sum = 0.0f;
-            for (uint32_t i = i25; i <= i75; i++) sum += raw_to_lps(s_raw[i]);
-            fef2575 = sum / (float)(i75 - i25 + 1);
+        if (i75>i25){
+            float sum=0.0f;
+            for(uint32_t i=i25;i<=i75;i++) sum+=raw_to_lps(s_raw[i]);
+            fef2575=sum/(float)(i75-i25+1);
         }
     }
-
-    /* ── FEF50: flow at 50% of FVC (interpolated) ── */
     float fef50 = compute_fef_at_volume_fraction(0.50f, fvc);
 
     bool valid = (duration_ms >= SPIRO_MIN_DURATION_MS) && (fvc >= 0.05f);
@@ -415,20 +444,16 @@ static void do_compute(void)
     s_result.duration_ms = duration_ms;
     s_result.raw_buf     = s_raw;
     s_result.vol_buf     = s_vol;
-
     s_has_result = true;
 }
 
-/* Helper: interpolate flow at a given FVC fraction */
 static float compute_fef_at_volume_fraction(float fraction, float fvc)
 {
     float target = fraction * fvc;
-    for (uint32_t i = 1; i < s_n; i++) {
-        if (s_vol[i] >= target) {
-            float t  = (target - s_vol[i-1]) / (s_vol[i] - s_vol[i-1] + 1e-9f);
-            float f0 = raw_to_lps(s_raw[i-1]);
-            float f1 = raw_to_lps(s_raw[i]);
-            return f0 + t * (f1 - f0);
+    for (uint32_t i=1;i<s_n;i++){
+        if (s_vol[i]>=target){
+            float t=(target-s_vol[i-1])/(s_vol[i]-s_vol[i-1]+1e-9f);
+            return raw_to_lps(s_raw[i-1]) + t*(raw_to_lps(s_raw[i])-raw_to_lps(s_raw[i-1]));
         }
     }
     return 0.0f;
@@ -439,134 +464,227 @@ static void gui_update_metrics(void)
 {
     char buf[16];
 
-    /* FEV1 */
+    /* FEV1 — integer-scaled to avoid printf_float */
     if (objects.fev1_val) {
-        snprintf(buf, sizeof(buf), "%.2f", s_result.fev1);
-        lv_label_set_text(objects.fev1_val, buf);
+        int v=(int)(s_result.fev1*100.0f+0.5f); if(v<0)v=0; if(v>800)v=800;
+        snprintf(buf,sizeof(buf),"%d.%02d",v/100,v%100);
+        lv_label_set_text(objects.fev1_val,buf);
     }
     if (objects.obj2) {
-        /* FS1015 max 100 SLPM = 1.667 L/s; integrated over ~1s → max FEV1 ~1.5 L */
-        int32_t pct = (int32_t)(s_result.fev1 / 1.5f * 100.0f);
-        if (pct > 100) pct = 100;
-        lv_bar_set_value(objects.obj2, pct, LV_ANIM_ON);
+        int32_t pct=(int32_t)(s_result.fev1/1.5f*100.0f);
+        if(pct>100)pct=100;
+        lv_bar_set_value(objects.obj2,pct,LV_ANIM_ON);
     }
-    /* FEV1 % label (obj3 shows the ratio %) — reuse for FEV1 % predicted
-       (we don't have predicted here, so show ratio) */
     if (objects.obj3) {
-        snprintf(buf, sizeof(buf), "%.0f%%", s_result.ratio);
-        lv_label_set_text(objects.obj3, buf);
+        int v=(int)(s_result.ratio+0.5f); if(v<0)v=0; if(v>100)v=100;
+        snprintf(buf,sizeof(buf),"%d%%",v);
+        lv_label_set_text(objects.obj3,buf);
     }
 
     /* FVC */
     if (objects.obj4) {
-        snprintf(buf, sizeof(buf), "%.2f", s_result.fvc);
-        lv_label_set_text(objects.obj4, buf);
+        int v=(int)(s_result.fvc*100.0f+0.5f); if(v<0)v=0; if(v>800)v=800;
+        snprintf(buf,sizeof(buf),"%d.%02d",v/100,v%100);
+        lv_label_set_text(objects.obj4,buf);
     }
     if (objects.obj5) {
-        /* FS1015 max 100 SLPM over ~6s maneuver → max FVC ~10 L; clamp to sensor limit */
-        int32_t pct = (int32_t)(s_result.fvc / 1.667f * 100.0f);
-        if (pct > 100) pct = 100;
-        lv_bar_set_value(objects.obj5, pct, LV_ANIM_ON);
+        int32_t pct=(int32_t)(s_result.fvc/1.667f*100.0f);
+        if(pct>100)pct=100;
+        lv_bar_set_value(objects.obj5,pct,LV_ANIM_ON);
     }
 
     /* FEV1/FVC ratio */
     if (objects.obj6) {
-        snprintf(buf, sizeof(buf), "%.1f", s_result.ratio);
-        lv_label_set_text(objects.obj6, buf);
+        int v=(int)(s_result.ratio*10.0f+0.5f); if(v<0)v=0; if(v>1000)v=1000;
+        snprintf(buf,sizeof(buf),"%d.%01d",v/10,v%10);
+        lv_label_set_text(objects.obj6,buf);
     }
     if (objects.obj7) {
-        int32_t pct = (int32_t)s_result.ratio;
-        if (pct > 100) pct = 100;
-        lv_bar_set_value(objects.obj7, pct, LV_ANIM_ON);
+        int32_t pct=(int32_t)s_result.ratio; if(pct>100)pct=100;
+        lv_bar_set_value(objects.obj7,pct,LV_ANIM_ON);
     }
 
     /* PEF */
     if (objects.obj8) {
-        snprintf(buf, sizeof(buf), "%.2f", s_result.pef);
-        lv_label_set_text(objects.obj8, buf);
+        int v=(int)(s_result.pef*100.0f+0.5f); if(v<0)v=0; if(v>1500)v=1500;
+        snprintf(buf,sizeof(buf),"%d.%02d",v/100,v%100);
+        lv_label_set_text(objects.obj8,buf);
     }
     if (objects.obj9) {
-        /* FS1015 max = 100 SLPM = 1.667 L/s; scale bar to that ceiling */
-        int32_t pct = (int32_t)(s_result.pef / 1.667f * 100.0f);
-        if (pct > 100) pct = 100;
-        lv_bar_set_value(objects.obj9, pct, LV_ANIM_ON);
+        int32_t pct=(int32_t)(s_result.pef/1.667f*100.0f);
+        if(pct>100)pct=100;
+        lv_bar_set_value(objects.obj9,pct,LV_ANIM_ON);
     }
 
-    /* Extended parameter strip */
+    /* Extended strip */
     if (objects.te_val) {
-        snprintf(buf, sizeof(buf), "Te:%.1fs", s_result.te);
-        lv_label_set_text(objects.te_val, buf);
+        int v=(int)(s_result.te*10.0f+0.5f); if(v<0)v=0; if(v>150)v=150;
+        snprintf(buf,sizeof(buf),"%d.%01ds",v/10,v%10);
+        lv_label_set_text(objects.te_val,buf);
     }
     if (objects.tpef_val) {
-        snprintf(buf, sizeof(buf), "Tp:%.2fs", s_result.tpef);
-        lv_label_set_text(objects.tpef_val, buf);
+        int v=(int)(s_result.tpef*100.0f+0.5f); if(v<0)v=0; if(v>1500)v=1500;
+        snprintf(buf,sizeof(buf),"%d.%02ds",v/100,v%100);
+        lv_label_set_text(objects.tpef_val,buf);
     }
     if (objects.fef2575_val) {
-        snprintf(buf, sizeof(buf), "2575:%.2f", s_result.fef2575);
-        lv_label_set_text(objects.fef2575_val, buf);
+        int v=(int)(s_result.fef2575*100.0f+0.5f); if(v<0)v=0; if(v>1500)v=1500;
+        snprintf(buf,sizeof(buf),"%d.%02d",v/100,v%100);
+        lv_label_set_text(objects.fef2575_val,buf);
     }
     if (objects.fef50_val) {
-        snprintf(buf, sizeof(buf), "F50:%.2f", s_result.fef50);
-        lv_label_set_text(objects.fef50_val, buf);
+        int v=(int)(s_result.fef50*100.0f+0.5f); if(v<0)v=0; if(v>1500)v=1500;
+        snprintf(buf,sizeof(buf),"%d.%02d",v/100,v%100);
+        lv_label_set_text(objects.fef50_val,buf);
     }
-
-    /* Saturation flag */
-    if (objects.sat_label) {
-        lv_label_set_text(objects.sat_label,
-                          s_result.saturated ? "SAT!" : "");
-    }
-
-    /* Validity */
-    if (objects.validity_label) {
-        lv_label_set_text(objects.validity_label,
-                          s_result.valid ? "OK" : "TOO SHORT");
-    }
+    if (objects.sat_label)
+        lv_label_set_text(objects.sat_label, s_result.saturated ? "SAT!" : "");
+    if (objects.validity_label)
+        lv_label_set_text(objects.validity_label, s_result.valid ? "OK" : "SHORT");
 }
 
 /* ── gui_update_fvl_graph ───────────────────────────────────────────────── */
+/*
+ * Auto-scales axes using the 2:1 L/s:L aspect ratio (ATS/ERS / ISO 26782).
+ * Updates axis labels, stores scale in fvl_x_max_ml / fvl_y_max_mlps,
+ * then invalidates the chart so fvl_draw_cb fires.
+ */
 static void gui_update_fvl_graph(void)
 {
-    if (!objects.fvl_chart) return;
-    /* Invalidate the canvas — fvl_draw_cb will repaint it */
+    if (!objects.fvl_chart || s_result.n_samples == 0) return;
+
+    /* Step 1: x_max from FVC, min 1 L, round up to 0.5 L */
+    float x_max = s_result.fvc;
+    if (x_max < 1.0f) x_max = 1.0f;
+    x_max = ceilf(x_max / 0.5f) * 0.5f;
+
+    /* Step 2: y_max for 2:1 aspect on the 210x100 canvas */
+    float y_max = 2.0f * x_max * (100.0f / 210.0f);
+
+    /* Step 3: ensure PEF fits */
+    if (s_result.pef > y_max) {
+        y_max = ceilf(s_result.pef / 0.5f) * 0.5f;
+        x_max = y_max * (210.0f / (2.0f * 100.0f));
+        x_max = ceilf(x_max / 0.5f) * 0.5f;
+        y_max = 2.0f * x_max * (100.0f / 210.0f);
+    }
+
+    fvl_x_max_ml   = (int32_t)(x_max * 1000.0f);
+    fvl_y_max_mlps = (int32_t)(y_max * 1000.0f);
+
+    /* Update axis labels */
+    char buf[16];
+    float yv[4] = { y_max, y_max*2.0f/3.0f, y_max/3.0f, 0.0f };
+    for (int i = 0; i < 4; i++) {
+        int v10 = (int)(yv[i]*10.0f+0.5f);
+        if (v10 < 0) v10 = 0;
+        if (v10 > 999) v10 = 999;
+        if (v10 % 10 == 0) snprintf(buf,sizeof(buf),"%d",   v10/10);
+        else                snprintf(buf,sizeof(buf),"%d.%d",v10/10, v10%10);
+        lv_label_set_text(objects.fvl_ylabel[i], buf);
+    }
+    float xv[4] = { 0.0f, x_max/3.0f, x_max*2.0f/3.0f, x_max };
+    for (int i = 0; i < 4; i++) {
+        int v10 = (int)(xv[i]*10.0f+0.5f);
+        if (v10 < 0) v10 = 0;
+        if (v10 > 999) v10 = 999;
+        if (v10 == 0)       snprintf(buf,sizeof(buf),"0");
+        else if (v10%10==0) snprintf(buf,sizeof(buf),"%d",   v10/10);
+        else                snprintf(buf,sizeof(buf),"%d.%d",v10/10, v10%10);
+        lv_label_set_text(objects.fvl_xlabel[i], buf);
+    }
+
+    if (objects.fvl_wait_lbl) lv_obj_add_flag(objects.fvl_wait_lbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(objects.fvl_chart);
 }
 
 /* ── gui_update_vt_graph ────────────────────────────────────────────────── */
 static void gui_update_vt_graph(void)
 {
-    if (!objects.vt_chart) return;
+    if (!objects.vt_chart || s_result.n_samples == 0) return;
+
+    /* Time range: te_s rounded up to nearest second, min 6 s */
+    float t_max = s_result.te;
+    if (t_max < 6.0f)  t_max = 6.0f;
+    if (t_max > 15.0f) t_max = 15.0f;
+    t_max = ceilf(t_max);
+
+    /* Volume range: fvc rounded up to 0.5 L, min 1 L */
+    float v_max = s_result.fvc;
+    if (v_max < 1.0f) v_max = 1.0f;
+    v_max = ceilf(v_max / 0.5f) * 0.5f;
+
+    /* 1L:1s aspect ratio on 214x148 canvas */
+    float ratio_req = 148.0f / 214.0f;
+    if ((v_max / t_max) < ratio_req) {
+        v_max = t_max * ratio_req;
+        v_max = ceilf(v_max / 0.5f) * 0.5f;
+    } else {
+        t_max = v_max / ratio_req;
+        t_max = ceilf(t_max);
+        if (t_max > 15.0f) t_max = 15.0f;
+    }
+
+    vt_t_max_ms = (int32_t)(t_max * 1000.0f);
+    vt_v_max_ml = (int32_t)(v_max * 1000.0f);
+
+    /* Update axis labels */
+    char buf[16];
+    float yv[4] = { v_max, v_max*2.0f/3.0f, v_max/3.0f, 0.0f };
+    for (int i = 0; i < 4; i++) {
+        int v10 = (int)(yv[i]*10.0f+0.5f);
+        if (v10 < 0) v10 = 0;
+        if (v10 > 999) v10 = 999;
+        if (v10 % 10 == 0) snprintf(buf,sizeof(buf),"%d",   v10/10);
+        else                snprintf(buf,sizeof(buf),"%d.%d",v10/10, v10%10);
+        lv_label_set_text(objects.vt_ylabel[i], buf);
+    }
+    float xv[4] = { 0.0f, t_max/3.0f, t_max*2.0f/3.0f, t_max };
+    for (int i = 0; i < 4; i++) {
+        int v10 = (int)(xv[i]*10.0f+0.5f);
+        if (v10 < 0) v10 = 0;
+        if (v10 > 999) v10 = 999;
+        if (v10 == 0)       snprintf(buf,sizeof(buf),"0");
+        else if (v10%10==0) snprintf(buf,sizeof(buf),"%d",   v10/10);
+        else                snprintf(buf,sizeof(buf),"%d.%d",v10/10, v10%10);
+        lv_label_set_text(objects.vt_xlabel[i], buf);
+    }
+
+    if (objects.vt_wait_lbl) lv_obj_add_flag(objects.vt_wait_lbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(objects.vt_chart);
 }
 
 /* ── gui_reset_display ──────────────────────────────────────────────────── */
 static void gui_reset_display(void)
 {
-    /* Metric tiles */
-    if (objects.fev1_val)  lv_label_set_text(objects.fev1_val,  "0.00");
+    if (objects.fev1_val)  lv_label_set_text(objects.fev1_val, "0.00");
     if (objects.obj2)      lv_bar_set_value(objects.obj2, 0, LV_ANIM_OFF);
-    if (objects.obj3)      lv_label_set_text(objects.obj3,       "--%");
-    if (objects.obj4)      lv_label_set_text(objects.obj4,       "0.00");
+    if (objects.obj3)      lv_label_set_text(objects.obj3, "0%");
+    if (objects.obj4)      lv_label_set_text(objects.obj4, "0.00");
     if (objects.obj5)      lv_bar_set_value(objects.obj5, 0, LV_ANIM_OFF);
-    if (objects.obj6)      lv_label_set_text(objects.obj6,       "0.0");
+    if (objects.obj6)      lv_label_set_text(objects.obj6, "0.0");
     if (objects.obj7)      lv_bar_set_value(objects.obj7, 0, LV_ANIM_OFF);
-    if (objects.obj8)      lv_label_set_text(objects.obj8,       "0.00");
+    if (objects.obj8)      lv_label_set_text(objects.obj8, "0.00");
     if (objects.obj9)      lv_bar_set_value(objects.obj9, 0, LV_ANIM_OFF);
 
-    /* Extended strip */
-    if (objects.te_val)        lv_label_set_text(objects.te_val,       "--");
-    if (objects.tpef_val)      lv_label_set_text(objects.tpef_val,     "--");
-    if (objects.fef2575_val)   lv_label_set_text(objects.fef2575_val,  "--");
-    if (objects.fef50_val)     lv_label_set_text(objects.fef50_val,    "--");
-    if (objects.sat_label)     lv_label_set_text(objects.sat_label,    "");
-    if (objects.validity_label) lv_label_set_text(objects.validity_label, "");
+    if (objects.te_val)        lv_label_set_text(objects.te_val,      "--");
+    if (objects.tpef_val)      lv_label_set_text(objects.tpef_val,    "--");
+    if (objects.fef2575_val)   lv_label_set_text(objects.fef2575_val, "--");
+    if (objects.fef50_val)     lv_label_set_text(objects.fef50_val,   "--");
+    if (objects.sat_label)     lv_label_set_text(objects.sat_label,   "");
+    if (objects.validity_label)lv_label_set_text(objects.validity_label, "--");
 
-    /* Show wait labels */
-    if (objects.fvl_wait_lbl)
-        lv_obj_clear_flag(objects.fvl_wait_lbl, LV_OBJ_FLAG_HIDDEN);
-    if (objects.vt_wait_lbl)
-        lv_obj_clear_flag(objects.vt_wait_lbl, LV_OBJ_FLAG_HIDDEN);
+    /* Reset axis labels to placeholder */
+    for (int i = 0; i < 4; i++) {
+        if (objects.fvl_ylabel[i]) lv_label_set_text(objects.fvl_ylabel[i], i==3?" 0":"--");
+        if (objects.fvl_xlabel[i]) lv_label_set_text(objects.fvl_xlabel[i], i==0?"0":"-");
+        if (objects.vt_ylabel[i])  lv_label_set_text(objects.vt_ylabel[i],  i==3?" 0":"--");
+        if (objects.vt_xlabel[i])  lv_label_set_text(objects.vt_xlabel[i],  i==0?"0":"-");
+    }
 
-    /* Clear graph canvases */
+    if (objects.fvl_wait_lbl) lv_obj_clear_flag(objects.fvl_wait_lbl, LV_OBJ_FLAG_HIDDEN);
+    if (objects.vt_wait_lbl)  lv_obj_clear_flag(objects.vt_wait_lbl,  LV_OBJ_FLAG_HIDDEN);
+
     if (objects.fvl_chart) lv_obj_invalidate(objects.fvl_chart);
     if (objects.vt_chart)  lv_obj_invalidate(objects.vt_chart);
 }
