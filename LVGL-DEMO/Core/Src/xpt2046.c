@@ -55,18 +55,24 @@ bool xpt2046_get_touch(int16_t *x, int16_t *y) {
         return false;
     }
 
-    uint16_t raw_x = xpt2046_average(0xD0); // measure X
-    uint16_t raw_y = xpt2046_average(0x90); // measure Y
+    /* XPT2046 channel mapping for ILI9341 in portrait (ROTATE_0 / MADCTL 0x48):
+     *   0xD0 = measure raw-X → maps to screen Y (axis swap required)
+     *   0x90 = measure raw-Y → maps to screen X
+     * Y is also inverted relative to the display origin, so we subtract from
+     * max before scaling.  If touch is still wrong after flashing, try removing
+     * the Y inversion line, or swap the two channel assignments.            */
+    uint16_t raw_screen_y = xpt2046_average(0xD0); /* touch X channel → screen Y */
+    uint16_t raw_screen_x = xpt2046_average(0x90); /* touch Y channel → screen X */
 
     // Clamp to calibration range
-    if (raw_x < X_MIN) raw_x = X_MIN;
-    if (raw_x > X_MAX) raw_x = X_MAX;
-    if (raw_y < Y_MIN) raw_y = Y_MIN;
-    if (raw_y > Y_MAX) raw_y = Y_MAX;
+    if (raw_screen_x < X_MIN) raw_screen_x = X_MIN;
+    if (raw_screen_x > X_MAX) raw_screen_x = X_MAX;
+    if (raw_screen_y < Y_MIN) raw_screen_y = Y_MIN;
+    if (raw_screen_y > Y_MAX) raw_screen_y = Y_MAX;
 
-    // Map to screen coordinates
-    *x = (int16_t)((uint32_t)(raw_x - X_MIN) * SCREEN_W / (X_MAX - X_MIN));
-    *y = (int16_t)((uint32_t)(raw_y - Y_MIN) * SCREEN_H / (Y_MAX - Y_MIN));
+    // Map to screen coordinates (Y is inverted)
+    *x = (int16_t)((uint32_t)(raw_screen_x - X_MIN) * SCREEN_W / (X_MAX - X_MIN));
+    *y = (int16_t)(SCREEN_H - 1 - (uint32_t)(raw_screen_y - Y_MIN) * SCREEN_H / (Y_MAX - Y_MIN));
 
     return true;
 }

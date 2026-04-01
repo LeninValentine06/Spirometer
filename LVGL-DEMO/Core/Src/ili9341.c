@@ -272,22 +272,32 @@ static void ConvHL(uint8_t *s, int32_t l)
 
 void ILI9341_DrawBitmap(uint16_t w, uint16_t h, uint8_t *s)
 {
-	// Enable to access GRAM
+	/*
+	 * ConvHL() has been intentionally removed.
+	 *
+	 * lv_port_disp.c sets LV_COLOR_FORMAT_RGB565_SWAPPED, so LVGL renders
+	 * pixels into the buffer already in ILI9341 wire order (big-endian
+	 * RGB565 — high byte first on SPI).  No byte-swap is needed here.
+	 *
+	 * The old ConvHL() call modified the LVGL draw buffer IN PLACE.  In
+	 * double-buffer mode LVGL hands the same pointer back for the next
+	 * render pass.  Any pixels LVGL does not re-render in that pass are
+	 * still byte-swapped from the previous call, so ConvHL swaps them a
+	 * second time → wrong colour on screen (classic "pixelated garbage").
+	 */
 	LCD_WR_REG(0x2c);
-
 	DC_H();
-	ConvHL(s, (int32_t)w*h*2);
-	sendSPI((uint8_t*)s, w * h *2);
+	//	ConvHL(s, (int32_t)w*h*2);
+	sendSPI((uint8_t*)s, w * h * 2);
 }
 
 void ILI9341_DrawBitmapDMA(uint16_t w, uint16_t h, uint8_t *s)
 {
-	// Enable to access GRAM
+	/* ConvHL removed — same reason as ILI9341_DrawBitmap above.
+	 * Buffer is already in correct wire order via RGB565_SWAPPED.      */
 	LCD_WR_REG(0x2c);
-
 	DC_H();
-	ConvHL(s, (int32_t)w*h*2);
-	HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)s, w * h *2);
+	HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)s, w * h * 2);
 }
 
 void ILI9341_EndOfDrawBitmap(void)
