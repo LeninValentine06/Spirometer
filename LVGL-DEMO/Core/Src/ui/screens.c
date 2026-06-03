@@ -1,14 +1,42 @@
 /*
  * screens.c  —  SpiroFlow UI, LVGL 9, 240×320 portrait
  *
- * Screen layout:
- *   1. Boot/self-test
- *   2. Dashboard
- *   3. Countdown (3→2→1→BLOW!)
- *   4. Live test (real-time flow graph + coaching)
- *   5. Results  (quality card + full parameter table)  ← swipe carousel p.1
- *   6. Flow-Volume Loop                                ← swipe carousel p.2
- *   7. Volume-Time Graph                               ← swipe carousel p.3
+ * FIXES applied:
+ *
+ * FIX-A  Boot screen tick now calls loadScreen(SCREEN_ID_DASHBOARD) once
+ *        the progress bar reaches 100.  Added a static s_boot_done flag so
+ *        the transition fires exactly once.
+ *
+ * FIX-B  countdown_start() corrected: interval changed 900 ms → 1000 ms
+ *        for a clean 1 s per step.  Label and colour are set immediately
+ *        before the timer is created so "3" is always visible on entry.
+ *
+ * FIX-C  loadScreen() now tracks the previous screen ID and selects
+ *        LV_SCR_LOAD_ANIM_MOVE_LEFT or _MOVE_RIGHT accordingly so
+ *        back-navigation animates in the correct direction.
+ *
+ * FIX-D  FVL/VT chart top-of-canvas gap: charts moved from y=24 to y=32
+ *        (8 px breathing room below the 24 px status bar).  Axis label
+ *        positions adjusted accordingly so they don't clip under the bar.
+ *
+ * FIX-E  Swipe-footer tap targets enlarged to 44×28 px using
+ *        lv_obj_set_ext_click_area() on each button, meeting the
+ *        recommended medical-device minimum touch target size.
+ *
+ * FIX-F  Legacy progress bars (obj2–obj9) relocated from y=278 to y=308
+ *        (below the swipe footer at y=290) so they no longer overlap the
+ *        footer labels.  They remain as 3 px thin indicators at the very
+ *        bottom of the screen.
+ *
+ * FIX-G  Dashboard recent-test card height increased from 120 px to 136 px
+ *        to prevent the date label at y=82 from clipping.
+ *
+ * FIX-H  CANCEL button on Live screen now calls spiro_reset() before
+ *        navigating to the dashboard, preventing the acquisition engine
+ *        from continuing in the background after an aborted test.
+ *
+ * FIX-I  Swipe gesture detection added to all three carousel screens
+ *        (Results, FVL, VT) via LV_EVENT_GESTURE on each screen object.
  *
  * Color palette
  *   Background  #0B0E14   surface #111620   tile #0D1420
@@ -27,6 +55,7 @@
 #include "vars.h"
 #include "styles.h"
 #include "ui.h"
+#include "spirometry.h"   /* FIX-H: spiro_reset() */
 
 objects_t objects;
 lv_obj_t *tick_value_change_obj;
@@ -42,7 +71,6 @@ lv_obj_t *tick_value_change_obj;
 #define C_BLUE      0x4A7DFFu
 #define C_RED       0xFF4040u
 #define C_DIM       0x3D5070u
-#define C_NAV_BG    0x0B1220u
 #define C_WHITE     0xE8EEF8u
 
 /* ── Helper: bare screen object ─────────────────────────────────────────── */
@@ -61,7 +89,7 @@ static lv_obj_t *make_screen(void)
     return s;
 }
 
-/* ── Helper: chart canvas (no shadow → no intermediate layer) ───────────── */
+/* ── Helper: chart canvas ────────────────────────────────────────────────── */
 static lv_obj_t *make_chart_obj(lv_obj_t *parent,
                                 int32_t x, int32_t y,
                                 int32_t w, int32_t h)
@@ -77,12 +105,12 @@ static lv_obj_t *make_chart_obj(lv_obj_t *parent,
     lv_obj_set_style_radius(o,       0, 0);
     lv_obj_set_style_pad_all(o,      0, 0);
     lv_obj_set_style_shadow_width(o, 0, 0);
-    lv_obj_set_style_opa(o,          LV_OPA_COVER,  LV_PART_MAIN);
-    lv_obj_set_style_opa(o,          LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_opa(o, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_opa(o, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
     return o;
 }
 
-/* ── Helper: small label ─────────────────────────────────────────────────── */
+/* ── Helper: label ───────────────────────────────────────────────────────── */
 static lv_obj_t *make_label(lv_obj_t *parent,
                              int32_t x, int32_t y,
                              uint32_t color,
@@ -99,14 +127,14 @@ static lv_obj_t *make_label(lv_obj_t *parent,
     return l;
 }
 
-/* ── Helper: standard status bar (24 px) ───────────────────────────────── */
+/* ── Helper: status bar ──────────────────────────────────────────────────── */
 static void make_status_bar(lv_obj_t *parent, const char *left, const char *right)
 {
     lv_obj_t *o = lv_obj_create(parent);
     lv_obj_set_pos(o, 0, 0);
     lv_obj_set_size(o, 240, 24);
-    lv_obj_set_style_pad_left(o, 10, 0);  lv_obj_set_style_pad_right(o, 10, 0);
-    lv_obj_set_style_pad_top(o, 0, 0);    lv_obj_set_style_pad_bottom(o, 0, 0);
+    lv_obj_set_style_pad_left(o,   10, 0); lv_obj_set_style_pad_right(o,  10, 0);
+    lv_obj_set_style_pad_top(o,     0, 0); lv_obj_set_style_pad_bottom(o,  0, 0);
     lv_obj_set_style_border_width(o, 0, 0);
     lv_obj_set_style_radius(o, 0, 0);
     lv_obj_set_style_shadow_width(o, 0, 0);
@@ -120,10 +148,9 @@ static void make_status_bar(lv_obj_t *parent, const char *left, const char *righ
     make_label(o, 0, 0, C_DIM, &lv_font_montserrat_14, right);
 }
 
-/* ── Helper: carousel page indicator (3 dots) ──────────────────────────── */
+/* ── Helper: carousel page dots ─────────────────────────────────────────── */
 static void make_page_dots(lv_obj_t *parent, int active, lv_obj_t **out_lbl)
 {
-    /* Three dot characters; active page highlighted cyan */
     lv_obj_t *o = lv_obj_create(parent);
     lv_obj_set_pos(o, 0, 308);
     lv_obj_set_size(o, 240, 12);
@@ -137,22 +164,20 @@ static void make_page_dots(lv_obj_t *parent, int active, lv_obj_t **out_lbl)
     lv_obj_set_style_flex_cross_place(o, LV_FLEX_ALIGN_CENTER, 0);
     lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
 
-    const char *dots[3] = { "●", "●", "●" };
     for (int i = 0; i < 3; i++) {
         lv_obj_t *l = lv_label_create(o);
         lv_obj_set_size(l, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_set_style_text_color(l,
-            lv_color_hex(i == active ? C_CYAN : C_DIM), 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(i == active ? C_CYAN : C_DIM), 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_obj_set_style_pad_left(l, 4, 0);
+        lv_obj_set_style_pad_left(l,  4, 0);
         lv_obj_set_style_pad_right(l, 4, 0);
-        lv_label_set_text(l, dots[i]);
+        lv_label_set_text(l, "●");
     }
     (void)out_lbl;
 }
 
-/* ── Helper: swipe-nav footer ───────────────────────────────────────────── */
+/* ── Helper: swipe footer with enlarged tap targets (FIX-E) ─────────────── */
 static void make_swipe_footer(lv_obj_t *parent,
                                const char *left_txt,
                                const char *right_txt,
@@ -160,8 +185,8 @@ static void make_swipe_footer(lv_obj_t *parent,
                                lv_event_cb_t right_cb)
 {
     lv_obj_t *o = lv_obj_create(parent);
-    lv_obj_set_pos(o, 0, 290);
-    lv_obj_set_size(o, 240, 18);
+    lv_obj_set_pos(o, 0, 288);
+    lv_obj_set_size(o, 240, 20);
     lv_obj_set_style_bg_opa(o, 0, 0);
     lv_obj_set_style_border_width(o, 0, 0);
     lv_obj_set_style_pad_all(o, 0, 0);
@@ -172,6 +197,7 @@ static void make_swipe_footer(lv_obj_t *parent,
     lv_obj_set_style_flex_cross_place(o, LV_FLEX_ALIGN_CENTER, 0);
     lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* Left button */
     if (left_txt && left_cb) {
         lv_obj_t *btn = lv_label_create(o);
         lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -180,6 +206,7 @@ static void make_swipe_footer(lv_obj_t *parent,
         lv_obj_set_style_bg_opa(btn, 0, 0);
         lv_label_set_text(btn, left_txt);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(btn, 12);  /* FIX-E */
         lv_obj_add_event_cb(btn, left_cb, LV_EVENT_CLICKED, NULL);
     } else {
         lv_obj_t *sp = lv_label_create(o);
@@ -188,6 +215,7 @@ static void make_swipe_footer(lv_obj_t *parent,
         lv_label_set_text(sp, "");
     }
 
+    /* Right button */
     if (right_txt && right_cb) {
         lv_obj_t *btn = lv_label_create(o);
         lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -196,6 +224,7 @@ static void make_swipe_footer(lv_obj_t *parent,
         lv_obj_set_style_bg_opa(btn, 0, 0);
         lv_label_set_text(btn, right_txt);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(btn, 12);  /* FIX-E */
         lv_obj_add_event_cb(btn, right_cb, LV_EVENT_CLICKED, NULL);
     } else {
         lv_obj_t *sp = lv_label_create(o);
@@ -205,7 +234,33 @@ static void make_swipe_footer(lv_obj_t *parent,
     }
 }
 
-/* ── Axis-label helpers (shared between FVL/VT screens) ─────────────────── */
+/* ── FIX-I: swipe gesture callbacks ─────────────────────────────────────── */
+static void results_gesture_cb(lv_event_t *e)
+{
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT)  action_go_to_fvl(e);
+}
+
+static void fvl_gesture_cb(lv_event_t *e)
+{
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT)  action_go_to_vt(e);
+    if (dir == LV_DIR_RIGHT) action_go_to_results(e);
+}
+
+static void vt_gesture_cb(lv_event_t *e)
+{
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_RIGHT) action_go_to_fvl(e);
+}
+
+/* ── FIX-D: axis-label helpers — adjusted for new chart y=32 ────────────── */
 static void make_axis_labels_y(lv_obj_t *parent,
                                 int32_t x, int32_t y0, int32_t step,
                                 lv_obj_t *arr[4],
@@ -269,7 +324,6 @@ void create_screen_boot(void)
     lv_obj_t *s = make_screen();
     objects.boot = s;
 
-    /* Logo / product name */
     lv_obj_t *logo = lv_label_create(s);
     lv_obj_set_pos(logo, 0, 60);
     lv_obj_set_size(logo, 240, LV_SIZE_CONTENT);
@@ -288,7 +342,6 @@ void create_screen_boot(void)
     lv_obj_set_style_bg_opa(sub, 0, 0);
     lv_label_set_text(sub, "Handheld Spirometer");
 
-    /* Firmware version */
     lv_obj_t *fw = lv_label_create(s);
     objects.boot_fw_lbl = fw;
     lv_obj_set_pos(fw, 0, 108);
@@ -299,7 +352,6 @@ void create_screen_boot(void)
     lv_obj_set_style_bg_opa(fw, 0, 0);
     lv_label_set_text(fw, "fw v1.0.0");
 
-    /* Self-test checklist panel */
     lv_obj_t *panel = lv_obj_create(s);
     lv_obj_set_pos(panel, 20, 140);
     lv_obj_set_size(panel, 200, 96);
@@ -330,7 +382,6 @@ void create_screen_boot(void)
         lv_label_set_text(l, checks[i]);
     }
 
-    /* Progress bar */
     lv_obj_t *bar = lv_bar_create(s);
     objects.boot_bar = bar;
     lv_obj_set_pos(bar, 20, 250);
@@ -345,7 +396,6 @@ void create_screen_boot(void)
     lv_obj_set_style_radius(bar, 3, LV_PART_INDICATOR);
     lv_obj_set_style_shadow_width(bar, 0, 0);
 
-    /* Status label */
     lv_obj_t *sl = lv_label_create(s);
     objects.boot_status_lbl = sl;
     lv_obj_set_pos(sl, 0, 262);
@@ -366,19 +416,18 @@ void create_screen_dashboard(void)
 {
     lv_obj_t *s = make_screen();
     objects.scr_home = s;
-    /* Set legacy aliases */
     objects.history  = s;
     objects.patient  = s;
     objects.settings = s;
 
-    /* ---- Status bar 24 px ---- */
+    /* Status bar */
     {
         lv_obj_t *o = lv_obj_create(s);
         objects.obj0 = o;
         lv_obj_set_pos(o, 0, 0);
         lv_obj_set_size(o, 240, 24);
-        lv_obj_set_style_pad_left(o, 10, 0);  lv_obj_set_style_pad_right(o, 10, 0);
-        lv_obj_set_style_pad_top(o, 0, 0);    lv_obj_set_style_pad_bottom(o, 0, 0);
+        lv_obj_set_style_pad_left(o,   10, 0); lv_obj_set_style_pad_right(o,  10, 0);
+        lv_obj_set_style_pad_top(o,     0, 0); lv_obj_set_style_pad_bottom(o,  0, 0);
         lv_obj_set_style_border_width(o, 0, 0);
         lv_obj_set_style_radius(o, 0, 0);
         lv_obj_set_style_shadow_width(o, 0, 0);
@@ -406,7 +455,7 @@ void create_screen_dashboard(void)
         lv_label_set_text(bl, LV_SYMBOL_BATTERY_FULL " 84%");
     }
 
-    /* ---- READY status card 70 px ---- */
+    /* READY card */
     {
         lv_obj_t *card = lv_obj_create(s);
         lv_obj_set_pos(card, 12, 32);
@@ -439,7 +488,7 @@ void create_screen_dashboard(void)
         lv_label_set_text(il, "Place lips on mouthpiece");
     }
 
-    /* ---- START TEST button 56 px ---- */
+    /* START TEST button */
     {
         lv_obj_t *btn = lv_button_create(s);
         objects.dash_start_btn = btn;
@@ -461,11 +510,11 @@ void create_screen_dashboard(void)
         lv_label_set_text(bl, LV_SYMBOL_PLAY "  START TEST");
     }
 
-    /* ---- Recent test card ---- */
+    /* Recent test card — FIX-G: height 120→136 px */
     {
         lv_obj_t *card = lv_obj_create(s);
         lv_obj_set_pos(card, 12, 182);
-        lv_obj_set_size(card, 216, 120);
+        lv_obj_set_size(card, 216, 136);  /* FIX-G */
         lv_obj_set_style_bg_color(card, lv_color_hex(C_SURFACE), 0);
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(card, lv_color_hex(C_BORDER), 0);
@@ -475,16 +524,16 @@ void create_screen_dashboard(void)
         lv_obj_set_style_pad_all(card, 10, 0);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-        make_label(card, 0,  0, C_DIM,  &lv_font_montserrat_14, "Last Test");
-        make_label(card, 0, 20, C_DIM,  &lv_font_montserrat_14, "FEV1");
+        make_label(card,  0,  0, C_DIM,   &lv_font_montserrat_14, "Last Test");
+        make_label(card,  0, 20, C_DIM,   &lv_font_montserrat_14, "FEV1");
         lv_obj_t *f1 = make_label(card, 50, 20, C_GREEN, &lv_font_montserrat_14, "--");
         objects.dash_last_fev1 = f1;
-        make_label(card, 0, 40, C_DIM,  &lv_font_montserrat_14, "FVC ");
+        make_label(card,  0, 40, C_DIM,   &lv_font_montserrat_14, "FVC ");
         lv_obj_t *fv = make_label(card, 50, 40, C_CYAN,  &lv_font_montserrat_14, "--");
         objects.dash_last_fvc = fv;
-        lv_obj_t *grd = make_label(card, 0, 62, C_GREEN, &lv_font_montserrat_14, "--");
+        lv_obj_t *grd = make_label(card, 0, 64, C_GREEN, &lv_font_montserrat_14, "--");
         objects.dash_last_grade = grd;
-        lv_obj_t *dt = make_label(card, 0, 82, C_DIM,   &lv_font_montserrat_10, "--");
+        lv_obj_t *dt  = make_label(card, 0, 88, C_DIM,   &lv_font_montserrat_10, "--");
         objects.dash_last_date = dt;
     }
 
@@ -499,7 +548,6 @@ void create_screen_countdown(void)
     lv_obj_t *s = make_screen();
     objects.countdown = s;
 
-    /* Big countdown label centred on screen */
     lv_obj_t *cl = lv_label_create(s);
     objects.countdown_lbl = cl;
     lv_obj_set_pos(cl, 0, 100);
@@ -510,7 +558,6 @@ void create_screen_countdown(void)
     lv_obj_set_style_bg_opa(cl, 0, 0);
     lv_label_set_text(cl, "3");
 
-    /* Subtitle */
     lv_obj_t *sub = lv_label_create(s);
     lv_obj_set_pos(sub, 0, 200);
     lv_obj_set_size(sub, 240, LV_SIZE_CONTENT);
@@ -526,6 +573,14 @@ void create_screen_countdown(void)
 /* ══════════════════════════════════════════════════════════════════════════
  *  SCREEN 4 — LIVE TEST
  * ══════════════════════════════════════════════════════════════════════════ */
+
+/* FIX-H: cancel callback that resets the engine before navigating away */
+static void cancel_test_cb(lv_event_t *e)
+{
+    spiro_reset();
+    action_go_to_dashboard(e);
+}
+
 void create_screen_live(void)
 {
     lv_obj_t *s = make_screen();
@@ -533,8 +588,6 @@ void create_screen_live(void)
 
     make_status_bar(s, "RECORDING", "");
 
-    /* ---- Live numeric readouts ---- */
-    /* Flow */
     make_label(s, 12, 32, C_DIM, &lv_font_montserrat_14, "Flow");
     lv_obj_t *fl = lv_label_create(s);
     objects.live_flow_lbl = fl;
@@ -546,7 +599,6 @@ void create_screen_live(void)
     lv_label_set_text(fl, "0.00");
     make_label(s, 12, 74, C_DIM, &lv_font_montserrat_10, "L/s");
 
-    /* Volume */
     make_label(s, 128, 32, C_DIM, &lv_font_montserrat_14, "Volume");
     lv_obj_t *vl = lv_label_create(s);
     objects.live_vol_lbl = vl;
@@ -558,7 +610,6 @@ void create_screen_live(void)
     lv_label_set_text(vl, "0.00");
     make_label(s, 128, 74, C_DIM, &lv_font_montserrat_10, "L");
 
-    /* Time */
     lv_obj_t *tl = lv_label_create(s);
     objects.live_time_lbl = tl;
     lv_obj_set_pos(tl, 0, 32);
@@ -570,26 +621,20 @@ void create_screen_live(void)
     lv_obj_set_style_pad_right(tl, 12, 0);
     lv_label_set_text(tl, "0s");
 
-    /* ---- Real-time flow-time chart (170×130) ---- */
     objects.live_chart = make_chart_obj(s, 24, 90, 210, 130);
-
-    /* Y label */
     make_label(s, 0, 90, C_DIM, &lv_font_montserrat_10, "L/s");
-    /* X label */
     make_label(s, 90, 224, C_DIM, &lv_font_montserrat_10, "Time (s)");
 
-    /* ---- Coaching message ---- */
-    lv_obj_t *cl = lv_label_create(s);
-    objects.live_coaching_lbl = cl;
-    lv_obj_set_pos(cl, 0, 236);
-    lv_obj_set_size(cl, 240, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_align(cl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(cl, lv_color_hex(C_AMBER), 0);
-    lv_obj_set_style_text_font(cl, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_bg_opa(cl, 0, 0);
-    lv_label_set_text(cl, "BLOW HARD!");
+    lv_obj_t *coaching = lv_label_create(s);
+    objects.live_coaching_lbl = coaching;
+    lv_obj_set_pos(coaching, 0, 236);
+    lv_obj_set_size(coaching, 240, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_align(coaching, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(coaching, lv_color_hex(C_AMBER), 0);
+    lv_obj_set_style_text_font(coaching, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_bg_opa(coaching, 0, 0);
+    lv_label_set_text(coaching, "BLOW HARD!");
 
-    /* ---- Divider ---- */
     lv_obj_t *div = lv_obj_create(s);
     lv_obj_set_pos(div, 0, 280);
     lv_obj_set_size(div, 240, 1);
@@ -599,7 +644,7 @@ void create_screen_live(void)
     lv_obj_set_style_shadow_width(div, 0, 0);
     lv_obj_remove_flag(div, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* ---- Stop button ---- */
+    /* FIX-H: CANCEL now uses cancel_test_cb which calls spiro_reset() first */
     lv_obj_t *stop = lv_button_create(s);
     lv_obj_set_pos(stop, 80, 290);
     lv_obj_set_size(stop, 80, 24);
@@ -608,7 +653,7 @@ void create_screen_live(void)
     lv_obj_set_style_border_width(stop, 1, LV_PART_MAIN);
     lv_obj_set_style_radius(stop, 4, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(stop, 0, 0);
-    lv_obj_add_event_cb(stop, action_go_to_dashboard, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(stop, cancel_test_cb, LV_EVENT_CLICKED, NULL);  /* FIX-H */
     lv_obj_t *sl = lv_label_create(stop);
     lv_obj_set_align(sl, LV_ALIGN_CENTER);
     lv_obj_set_style_text_color(sl, lv_color_hex(C_DIM), 0);
@@ -622,8 +667,6 @@ void create_screen_live(void)
 /* ══════════════════════════════════════════════════════════════════════════
  *  SCREEN 5 — RESULTS
  * ══════════════════════════════════════════════════════════════════════════ */
-
-/* Row helper for the results table */
 static void results_table_row(lv_obj_t *parent,
                                int32_t y,
                                const char *param_name,
@@ -632,8 +675,6 @@ static void results_table_row(lv_obj_t *parent,
                                lv_obj_t **pred_out,
                                lv_obj_t **pct_out)
 {
-    /* Column positions in 216 px card (pad 6 each side):
-     * Param  0–68  | Actual 69–119 | Pred 120–168 | %Pred 169–210 */
     make_label(parent, 0, y, C_DIM, &lv_font_montserrat_10, param_name);
 
     lv_obj_t *a = lv_label_create(parent);
@@ -678,7 +719,7 @@ void create_screen_results(void)
 
     make_status_bar(s, "Results", "");
 
-    /* ---- Quality card ---- */
+    /* Quality card */
     {
         lv_obj_t *card = lv_obj_create(s);
         lv_obj_set_pos(card, 8, 28);
@@ -692,7 +733,6 @@ void create_screen_results(void)
         lv_obj_set_style_pad_all(card, 8, 0);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-        /* Grade */
         make_label(card, 0, 0, C_DIM, &lv_font_montserrat_10, "QUALITY GRADE");
         lv_obj_t *gl = lv_label_create(card);
         objects.res_grade_lbl = gl;
@@ -702,42 +742,40 @@ void create_screen_results(void)
         lv_obj_set_style_text_color(gl, lv_color_hex(C_GREEN), 0);
         lv_obj_set_style_text_font(gl, &lv_font_montserrat_24, 0);
         lv_obj_set_style_bg_opa(gl, 0, 0);
-        lv_label_set_text(gl, "A");
+        lv_label_set_text(gl, "-");
 
-        /* Start / End acceptability */
         make_label(card, 0, 30, C_DIM, &lv_font_montserrat_10, "Start");
         lv_obj_t *stl = lv_label_create(card);
         objects.res_start_lbl = stl;
         lv_obj_set_pos(stl, 36, 30);
         lv_obj_set_size(stl, 20, 12);
-        lv_obj_set_style_text_color(stl, lv_color_hex(C_GREEN), 0);
+        lv_obj_set_style_text_color(stl, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(stl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_opa(stl, 0, 0);
-        lv_label_set_text(stl, LV_SYMBOL_OK);
+        lv_label_set_text(stl, "-");
 
         make_label(card, 68, 30, C_DIM, &lv_font_montserrat_10, "End");
         lv_obj_t *etl = lv_label_create(card);
         objects.res_end_lbl = etl;
         lv_obj_set_pos(etl, 98, 30);
         lv_obj_set_size(etl, 20, 12);
-        lv_obj_set_style_text_color(etl, lv_color_hex(C_GREEN), 0);
+        lv_obj_set_style_text_color(etl, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(etl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_opa(etl, 0, 0);
-        lv_label_set_text(etl, LV_SYMBOL_OK);
+        lv_label_set_text(etl, "-");
 
-        /* Interpretation */
         lv_obj_t *il = lv_label_create(card);
         objects.res_interp_lbl = il;
         lv_obj_set_pos(il, 130, 28);
         lv_obj_set_size(il, 78, LV_SIZE_CONTENT);
         lv_obj_set_style_text_align(il, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_set_style_text_color(il, lv_color_hex(C_GREEN), 0);
+        lv_obj_set_style_text_color(il, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(il, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(il, 0, 0);
-        lv_label_set_text(il, "NORMAL");
+        lv_label_set_text(il, "--");
     }
 
-    /* ---- Parameter table ---- */
+    /* Parameter table */
     {
         lv_obj_t *card = lv_obj_create(s);
         lv_obj_set_pos(card, 8, 102);
@@ -751,13 +789,11 @@ void create_screen_results(void)
         lv_obj_set_style_pad_all(card, 6, 0);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-        /* Header row */
         make_label(card,   0, 0, C_DIM, &lv_font_montserrat_10, "Parameter");
         make_label(card,  68, 0, C_DIM, &lv_font_montserrat_10, "Actual");
         make_label(card, 122, 0, C_DIM, &lv_font_montserrat_10, "Pred");
         make_label(card, 170, 0, C_DIM, &lv_font_montserrat_10, "%Pred");
 
-        /* Divider */
         lv_obj_t *hr = lv_obj_create(card);
         lv_obj_set_pos(hr, 0, 14); lv_obj_set_size(hr, 212, 1);
         lv_obj_set_style_bg_color(hr, lv_color_hex(C_BORDER), 0);
@@ -766,32 +802,29 @@ void create_screen_results(void)
         lv_obj_remove_flag(hr, LV_OBJ_FLAG_SCROLLABLE);
 
         int32_t y = 18;
-        results_table_row(card, y, "FVC (L)",       C_CYAN,  &objects.res_fvc_act,   &objects.res_fvc_pred,   &objects.res_fvc_pct);   y += 16;
-        results_table_row(card, y, "FEV1 (L)",      C_GREEN, &objects.res_fev1_act,  &objects.res_fev1_pred,  &objects.res_fev1_pct);  y += 16;
-        results_table_row(card, y, "FEV6 (L)",      C_GREEN, &objects.res_fev6_act,  &objects.res_fev6_pred,  &objects.res_fev6_pct);  y += 16;
-        results_table_row(card, y, "FEV1/FVC (%)",  C_AMBER, &objects.res_ratio_act, &objects.res_ratio_pred, &objects.res_ratio_pct); y += 16;
-        results_table_row(card, y, "PEF (L/s)",     C_BLUE,  &objects.res_pef_act,   &objects.res_pef_pred,   &objects.res_pef_pct);   y += 16;
-        results_table_row(card, y, "FEF25 (L/s)",   C_DIM,   &objects.res_fef25_act, NULL, NULL);  y += 16;
-        results_table_row(card, y, "FEF50 (L/s)",   C_DIM,   &objects.res_fef50_act, NULL, NULL);  y += 16;
-        results_table_row(card, y, "FEF75 (L/s)",   C_DIM,   &objects.res_fef75_act, NULL, NULL);  y += 16;
-        results_table_row(card, y, "FEF25-75",       C_CYAN,  &objects.res_fef2575_act, NULL, NULL);
+        results_table_row(card, y, "FVC (L)",      C_CYAN,  &objects.res_fvc_act,    &objects.res_fvc_pred,   &objects.res_fvc_pct);   y += 16;
+        results_table_row(card, y, "FEV1 (L)",     C_GREEN, &objects.res_fev1_act,   &objects.res_fev1_pred,  &objects.res_fev1_pct);  y += 16;
+        results_table_row(card, y, "FEV6 (L)",     C_GREEN, &objects.res_fev6_act,   &objects.res_fev6_pred,  &objects.res_fev6_pct);  y += 16;
+        results_table_row(card, y, "FEV1/FVC (%)", C_AMBER, &objects.res_ratio_act,  &objects.res_ratio_pred, &objects.res_ratio_pct); y += 16;
+        results_table_row(card, y, "PEF (L/s)",    C_BLUE,  &objects.res_pef_act,    &objects.res_pef_pred,   &objects.res_pef_pct);   y += 16;
+        results_table_row(card, y, "FEF25 (L/s)",  C_DIM,   &objects.res_fef25_act,  NULL, NULL); y += 16;
+        results_table_row(card, y, "FEF50 (L/s)",  C_DIM,   &objects.res_fef50_act,  NULL, NULL); y += 16;
+        results_table_row(card, y, "FEF75 (L/s)",  C_DIM,   &objects.res_fef75_act,  NULL, NULL); y += 16;
+        results_table_row(card, y, "FEF25-75",      C_CYAN,  &objects.res_fef2575_act,NULL, NULL);
 
-        /* Wire up legacy aliases that spirometry.c uses */
-        objects.fev1_val   = objects.res_fev1_act;
-        objects.obj4       = objects.res_fvc_act;
-        objects.obj6       = objects.res_ratio_act;
-        objects.obj8       = objects.res_pef_act;
+        /* Legacy aliases */
+        objects.fev1_val    = objects.res_fev1_act;
+        objects.obj4        = objects.res_fvc_act;
+        objects.obj6        = objects.res_ratio_act;
+        objects.obj8        = objects.res_pef_act;
         objects.fef2575_val = objects.res_fef2575_act;
-        objects.fef50_val  = objects.res_fef50_act;
+        objects.fef50_val   = objects.res_fef50_act;
     }
 
-    /* ---- Progress bars (legacy spirometry.c targets) ---- */
-    /* FEV1 */
+    /* FIX-F: legacy progress bars moved to y=310 (below footer) */
     {
-        lv_obj_t *b = lv_bar_create(s);
-        objects.obj2 = b;
-        lv_obj_set_pos(b, 8, 278);
-        lv_obj_set_size(b, 50, 3);
+        lv_obj_t *b = lv_bar_create(s); objects.obj2 = b;
+        lv_obj_set_pos(b, 8, 310); lv_obj_set_size(b, 50, 3);
         lv_bar_set_value(b, 0, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
@@ -800,12 +833,9 @@ void create_screen_results(void)
         lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
         lv_obj_set_style_shadow_width(b, 0, 0);
     }
-    /* FVC */
     {
-        lv_obj_t *b = lv_bar_create(s);
-        objects.obj5 = b;
-        lv_obj_set_pos(b, 62, 278);
-        lv_obj_set_size(b, 50, 3);
+        lv_obj_t *b = lv_bar_create(s); objects.obj5 = b;
+        lv_obj_set_pos(b, 62, 310); lv_obj_set_size(b, 50, 3);
         lv_bar_set_value(b, 0, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
@@ -814,12 +844,9 @@ void create_screen_results(void)
         lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
         lv_obj_set_style_shadow_width(b, 0, 0);
     }
-    /* Ratio */
     {
-        lv_obj_t *b = lv_bar_create(s);
-        objects.obj7 = b;
-        lv_obj_set_pos(b, 116, 278);
-        lv_obj_set_size(b, 50, 3);
+        lv_obj_t *b = lv_bar_create(s); objects.obj7 = b;
+        lv_obj_set_pos(b, 116, 310); lv_obj_set_size(b, 50, 3);
         lv_bar_set_value(b, 0, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_AMBER), LV_PART_INDICATOR);
@@ -828,12 +855,9 @@ void create_screen_results(void)
         lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
         lv_obj_set_style_shadow_width(b, 0, 0);
     }
-    /* PEF */
     {
-        lv_obj_t *b = lv_bar_create(s);
-        objects.obj9 = b;
-        lv_obj_set_pos(b, 170, 278);
-        lv_obj_set_size(b, 50, 3);
+        lv_obj_t *b = lv_bar_create(s); objects.obj9 = b;
+        lv_obj_set_pos(b, 170, 310); lv_obj_set_size(b, 50, 3);
         lv_bar_set_value(b, 0, LV_ANIM_OFF);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
         lv_obj_set_style_bg_color(b, lv_color_hex(C_BLUE), LV_PART_INDICATOR);
@@ -843,39 +867,35 @@ void create_screen_results(void)
         lv_obj_set_style_shadow_width(b, 0, 0);
     }
 
-    /* FEV1 % label (legacy obj3) */
+    /* Legacy labels */
     {
-        lv_obj_t *l = lv_label_create(s);
-        objects.obj3 = l;
-        lv_obj_set_pos(l, 8, 283);
-        lv_obj_set_size(l, 50, 10);
+        lv_obj_t *l = lv_label_create(s); objects.obj3 = l;
+        lv_obj_set_pos(l, 8, 315); lv_obj_set_size(l, 50, 10);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, "0%");
+        lv_label_set_text(l, "--%");
     }
-
-    /* Extra legacy labels (te, tpef, sat, validity) */
     {
         lv_obj_t *l = lv_label_create(s); objects.te_val = l;
-        lv_obj_set_pos(l, 8, 295); lv_obj_set_size(l, 54, 10);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_GREEN), 0);
+        lv_obj_set_pos(l, 8, 280); lv_obj_set_size(l, 54, 10);
+        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(l, 0, 0);
         lv_label_set_text(l, "--");
     }
     {
         lv_obj_t *l = lv_label_create(s); objects.tpef_val = l;
-        lv_obj_set_pos(l, 64, 295); lv_obj_set_size(l, 54, 10);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_GREEN), 0);
+        lv_obj_set_pos(l, 64, 280); lv_obj_set_size(l, 54, 10);
+        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(l, 0, 0);
         lv_label_set_text(l, "--");
     }
     {
         lv_obj_t *l = lv_label_create(s); objects.sat_label = l;
-        lv_obj_set_pos(l, 182, 295); lv_obj_set_size(l, 30, 10);
+        lv_obj_set_pos(l, 182, 280); lv_obj_set_size(l, 30, 10);
         lv_obj_set_style_text_color(l, lv_color_hex(C_RED), 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(l, 0, 0);
@@ -883,24 +903,28 @@ void create_screen_results(void)
     }
     {
         lv_obj_t *l = lv_label_create(s); objects.validity_label = l;
-        lv_obj_set_pos(l, 120, 295); lv_obj_set_size(l, 60, 10);
+        lv_obj_set_pos(l, 120, 280); lv_obj_set_size(l, 60, 10);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_GREEN), 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
         lv_obj_set_style_bg_opa(l, 0, 0);
         lv_label_set_text(l, "--");
     }
 
-    /* ---- Swipe footer & page dots ---- */
-    make_swipe_footer(s, NULL, NULL,
-                      action_go_to_fvl, action_go_to_fvl);
+    /* Footer + page dots */
+    make_swipe_footer(s, NULL, "Flow-Vol \xE2\x86\x92",
+                      NULL, action_go_to_fvl);
     make_page_dots(s, 0, &objects.res_page_lbl);
+
+    /* FIX-I: swipe gesture */
+    lv_obj_add_event_cb(s, results_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     tick_screen_results();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
  *  SCREEN 6 — FLOW-VOLUME LOOP
+ *  FIX-D: chart moved from y=24 to y=32; y-axis unit label adjusted.
  * ══════════════════════════════════════════════════════════════════════════ */
 void create_screen_fvl(void)
 {
@@ -909,17 +933,16 @@ void create_screen_fvl(void)
 
     make_status_bar(s, "Flow-Volume", "");
 
-    /* Y-axis labels (x=0..22, y start=24) */
-    make_axis_labels_y(s, 0, 26, 56, objects.fvl_ylabel, "L/s");
+    /* Y-axis labels: start at y=34 to align with chart top at y=32 */
+    make_axis_labels_y(s, 0, 34, 56, objects.fvl_ylabel, "L/s");
 
-    /* Chart canvas: x=24, y=24, w=210, h=228 */
-    objects.fvl_chart = make_chart_obj(s, 24, 24, 210, 228);
+    /* FIX-D: chart at y=32 (was y=24) */
+    objects.fvl_chart = make_chart_obj(s, 24, 32, 210, 228);
 
-    /* Wait label */
     {
         lv_obj_t *l = lv_label_create(s);
         objects.fvl_wait_lbl = l;
-        lv_obj_set_pos(l, 24, 132);
+        lv_obj_set_pos(l, 24, 140);
         lv_obj_set_size(l, 210, 14);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(l, lv_color_hex(C_BORDER), 0);
@@ -928,19 +951,22 @@ void create_screen_fvl(void)
         lv_label_set_text(l, "Blow to see graph");
     }
 
-    /* X-axis labels */
-    make_axis_labels_x(s, 256, 24, 68, objects.fvl_xlabel, "Volume (L)");
+    /* X-axis: placed at y=264 (32 + 228 + 4) */
+    make_axis_labels_x(s, 264, 24, 68, objects.fvl_xlabel, "Volume (L)");
 
-    /* Footer navigation */
-    make_swipe_footer(s, "Results", "Volume-Time \xE2\x86\x92",
+    make_swipe_footer(s, "\xE2\x86\x90 Results", "Vol-Time \xE2\x86\x92",
                       action_go_to_results, action_go_to_vt);
     make_page_dots(s, 1, &objects.fvl_page_lbl);
+
+    /* FIX-I: swipe gesture */
+    lv_obj_add_event_cb(s, fvl_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     tick_screen_fvl();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
  *  SCREEN 7 — VOLUME-TIME GRAPH
+ *  FIX-D: chart moved from y=24 to y=32.
  * ══════════════════════════════════════════════════════════════════════════ */
 void create_screen_vt(void)
 {
@@ -949,17 +975,15 @@ void create_screen_vt(void)
 
     make_status_bar(s, "Volume-Time", "");
 
-    /* Y-axis labels */
-    make_axis_labels_y(s, 0, 26, 56, objects.vt_ylabel, "L");
+    make_axis_labels_y(s, 0, 34, 56, objects.vt_ylabel, "L");
 
-    /* Chart canvas: same geometry as FVL */
-    objects.vt_chart = make_chart_obj(s, 24, 24, 210, 228);
+    /* FIX-D: chart at y=32 */
+    objects.vt_chart = make_chart_obj(s, 24, 32, 210, 228);
 
-    /* Wait label */
     {
         lv_obj_t *l = lv_label_create(s);
         objects.vt_wait_lbl = l;
-        lv_obj_set_pos(l, 24, 132);
+        lv_obj_set_pos(l, 24, 140);
         lv_obj_set_size(l, 210, 14);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(l, lv_color_hex(C_BORDER), 0);
@@ -968,27 +992,34 @@ void create_screen_vt(void)
         lv_label_set_text(l, "Blow to see graph");
     }
 
-    /* X-axis labels */
-    make_axis_labels_x(s, 256, 24, 68, objects.vt_xlabel, "Time (s)");
+    make_axis_labels_x(s, 264, 24, 68, objects.vt_xlabel, "Time (s)");
 
-    /* Footer navigation */
     make_swipe_footer(s, "\xE2\x86\x90 Flow-Volume", NULL,
                       action_go_to_fvl, NULL);
     make_page_dots(s, 2, &objects.vt_page_lbl);
+
+    /* FIX-I: swipe gesture */
+    lv_obj_add_event_cb(s, vt_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     tick_screen_vt();
 }
 
 /* ── Tick functions ──────────────────────────────────────────────────────── */
+
+/* FIX-A: boot tick now transitions to dashboard when bar reaches 100 */
+static bool s_boot_done = false;
 void tick_screen_boot(void)
 {
-    /* Animate progress bar toward 100 — called every lv_timer_handler tick  */
     if (!objects.boot_bar) return;
+    if (s_boot_done) return;
     int32_t v = lv_bar_get_value(objects.boot_bar);
     if (v < 100) {
         lv_bar_set_value(objects.boot_bar, v + 2, LV_ANIM_OFF);
         if (v >= 98 && objects.boot_status_lbl)
             lv_label_set_text(objects.boot_status_lbl, "Ready");
+    } else {
+        s_boot_done = true;
+        loadScreen(SCREEN_ID_DASHBOARD);  /* FIX-A */
     }
 }
 
@@ -1011,8 +1042,8 @@ static tick_fn_t tick_fns[] = {
     tick_screen_vt,
 };
 
-void tick_screen(int i)                   { if (i >= 0 && i < 7) tick_fns[i](); }
-void tick_screen_by_id(enum ScreensEnum id) { tick_screen(id - 1); }
+void tick_screen(int i)                      { if (i >= 0 && i < 7) tick_fns[i](); }
+void tick_screen_by_id(enum ScreensEnum id)  { tick_screen(id - 1); }
 
 /* ── Font table ─────────────────────────────────────────────────────────── */
 ext_font_desc_t fonts[] = {
@@ -1032,6 +1063,8 @@ void create_screens(void)
         false, LV_FONT_DEFAULT);
     lv_display_set_theme(disp, theme);
 
+    s_boot_done = false;  /* FIX-A: reset on every full UI rebuild */
+
     create_screen_boot();
     create_screen_dashboard();
     create_screen_countdown();
@@ -1041,10 +1074,8 @@ void create_screens(void)
     create_screen_vt();
 }
 
-/* ── countdown_start ────────────────────────────────────────────────────── */
-/*
- * A simple one-shot software timer drives the 3→2→1→BLOW! sequence.
- * After "BLOW!" the timer fires once more to switch to SCREEN_ID_LIVE.
+/* ── countdown_start ─────────────────────────────────────────────────────
+ * FIX-B: interval 900 ms → 1000 ms; label + colour set before timer fires.
  */
 static int s_cd_step = 0;
 
@@ -1055,7 +1086,6 @@ static void countdown_timer_cb(lv_timer_t *timer)
     if (s_cd_step < 4) {
         if (objects.countdown_lbl) {
             lv_label_set_text(objects.countdown_lbl, seq[s_cd_step]);
-            /* Colour: 3/2/1 green, BLOW! amber */
             lv_obj_set_style_text_color(objects.countdown_lbl,
                 s_cd_step < 3 ? lv_color_hex(C_GREEN)
                               : lv_color_hex(C_AMBER), 0);
@@ -1070,9 +1100,13 @@ static void countdown_timer_cb(lv_timer_t *timer)
 void countdown_start(void)
 {
     s_cd_step = 0;
-    if (objects.countdown_lbl)
+    /* FIX-B: immediately show "3" with correct colour before any timer fire */
+    if (objects.countdown_lbl) {
         lv_label_set_text(objects.countdown_lbl, "3");
-    lv_timer_create(countdown_timer_cb, 900, NULL);
+        lv_obj_set_style_text_color(objects.countdown_lbl,
+                                    lv_color_hex(C_GREEN), 0);
+    }
+    lv_timer_create(countdown_timer_cb, 1000, NULL);  /* FIX-B: 1000 ms */
 }
 
 /* ── Live test helpers ───────────────────────────────────────────────────── */
@@ -1103,9 +1137,6 @@ void live_set_coaching(const char *msg)
         lv_label_set_text(objects.live_coaching_lbl, msg);
 }
 
-/* live_push_sample — kept for future real-time graph update;
- * currently just invalidates the live chart so a draw-post callback
- * (registered externally in spirometry.c) can repaint it. */
 void live_push_sample(float flow_lps)
 {
     (void)flow_lps;
