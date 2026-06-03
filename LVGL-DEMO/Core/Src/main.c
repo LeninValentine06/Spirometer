@@ -4,138 +4,184 @@
   * @file           : main.c
   * @brief          : Main program body — spirometry UI + flow engine
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 
-/* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
 #include "dma.h"
 #include "spi.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* USER CODE BEGIN Includes */
+#include <stdio.h>          /* printf / snprintf */
 #include "lvgl.h"
 #include "lv_port_disp.h"
 #include "xpt2046.h"
+#include "touch_cal.h"
 #include "ui/ui.h"
 #include "ui/screens.h"
-#include "spirometry.h"   /* <── spirometry engine */
+#include "spirometry.h"
+#include <stdlib.h>
 /* USER CODE END Includes */
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN PV */
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-/* USER CODE BEGIN PFP */
-/* USER CODE END PFP */
 
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/*
+ * Redirect printf → USART1 (PA9 TX, 115200 8N1).
+ * Every call to printf / puts / fprintf(stdout) flows through here.
+ * Cost: ~87 µs per byte at 115200 baud — fine for debug, avoid in hot path.
+ */
+int __io_putchar(int ch)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+    return ch;
+}
+
+/*
+ * LOG(fmt, ...) — timestamped single-line log macro.
+ * Output example:  [  1234] touch raw x=1820 y=2310
+ * The %6lu zero-pads the tick to keep columns aligned.
+ */
+#define LOG(fmt, ...)  \
+    printf("[%6lu] " fmt "\r\n", HAL_GetTick(), ##__VA_ARGS__)
+
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-  /* USER CODE END 1 */
-
-  /* MCU Configuration -------------------------------------------------------*/
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-  /* USER CODE END Init */
-
   SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_SPI2_Init();
   MX_ADC1_Init();
+  MX_USART1_UART_Init();
 
   /* USER CODE BEGIN 2 */
 
-  /* ── LVGL + display ── */
+  /* ── First log line — proves UART is alive ────────────────────────── */
+  LOG("=== BOOT ===");
+  LOG("USART1 115200 8N1 OK");
+
+  /* ── Step 1: LVGL + display ─────────────────────────────────────────── */
+  LOG("lv_init...");
   lv_init();
   lv_tick_set_cb(HAL_GetTick);
-  lv_port_disp_init();
 
-  /* ── Touch input ── */
+  LOG("lv_port_disp_init...");
+  lv_port_disp_init();
+  LOG("display OK — ILI9341 ROTATE_0 240x320");
+
+  /* ── Step 2: Touch hardware ──────────────────────────────────────────── */
+  LOG("xpt2046_init...");
   xpt2046_init();
+
+  /*
+   * Quick IRQ sanity check — read T_IRQ once BEFORE calibration.
+   * Expected when NOT touching: GPIO_PIN_SET (1 = not pressed).
+   * If it prints 0 here with no finger on the panel, T_IRQ is stuck low
+   * (floating, shorted, or PULLUP fighting the module's own pull-up).
+   */
+  uint8_t irq_idle = HAL_GPIO_ReadPin(TOUCH_IRQ_GPIO_Port, TOUCH_IRQ_Pin);
+  LOG("T_IRQ idle = %u  (expected 1 = not pressed)", irq_idle);
+  if (irq_idle == 0) {
+      LOG("WARNING: T_IRQ is LOW with no touch — check wiring or gpio.c pull setting");
+  }
+
+  /* ── Step 3: Calibration ─────────────────────────────────────────────── */
+  LOG("touch_cal_run — waiting for 4 corner taps...");
+  touch_cal_run();
+  LOG("calibration done");
+
+  /* ── Step 4: Register LVGL indev ────────────────────────────────────── */
+  LOG("registering touch indev...");
   lv_indev_t *touch_indev = lv_indev_create();
   lv_indev_set_type(touch_indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(touch_indev, lv_touchpad_read);
+  LOG("indev registered");
 
-  /* ── Build all screens and load home ── */
-  ui_init();   /* create_screens() → loadScreen(SCREEN_ID_SCR_HOME) */
+  /* ── Step 5: UI ──────────────────────────────────────────────────────── */
+  LOG("ui_init...");
+  ui_init();
+  LOG("ui_init done");
 
-  /* ── Spirometry engine ──
-       Must be called AFTER ui_init() so that objects.fvl_chart etc. exist.
-       spiro_init() registers draw callbacks on fvl_chart and vt_chart,
-       then resets the GUI to its "waiting" state.                        */
+  /* ── Step 6: Spirometry engine ───────────────────────────────────────── */
+  LOG("spiro_init...");
   spiro_init();
+  LOG("spiro_init done");
+
+  LOG("=== ENTERING MAIN LOOP ===");
 
   /* USER CODE END 2 */
 
-  /* ── Infinite loop ── */
+  /* ── Main loop ───────────────────────────────────────────────────────── */
   /* USER CODE BEGIN WHILE */
+
+  /*
+   * Touch probe variables — log every new touch coordinate once per press.
+   * Removed from production build by defining NDEBUG or deleting this block.
+   */
+  static int16_t last_logged_x = -1;
+  static int16_t last_logged_y = -1;
+  static bool    was_pressed   = false;
+  uint32_t       loop_count    = 0;
+
   while (1)
   {
     /* USER CODE END WHILE */
-
-    /* Run LVGL timer tasks (rendering, animations, events) */
-    lv_timer_handler();
-
-    /* Run spirometry state machine:
-         - polls ADC for flow sample
-         - detects blow start / end
-         - computes parameters after maneuver
-         - updates GUI labels, progress bars and graph canvases            */
-    spiro_process();
-
-    HAL_Delay(2);   /* ~500 Hz effective sample rate (2 ms per loop tick)  */
-
     /* USER CODE BEGIN 3 */
+
+    lv_timer_handler();
+    spiro_process();
+    HAL_Delay(2);
+
+    /*
+     * Touch logging — fires once on press (coordinates) and once on release.
+     * At 2 ms per loop this adds ~0 overhead when not touching.
+     * Comment out this entire block once touch is confirmed working.
+     */
+    {
+        int16_t tx = 0, ty = 0;
+        bool pressed = xpt2046_get_touch(&tx, &ty);
+
+        if (pressed && !was_pressed) {
+            /* New press — log raw calibrated coordinates */
+            LOG("TOUCH PRESS  x=%4d y=%4d", tx, ty);
+            last_logged_x = tx;
+            last_logged_y = ty;
+            was_pressed = true;
+        } else if (pressed && (tx != last_logged_x || ty != last_logged_y)) {
+            /* Drag — log only if position changed significantly */
+            if (abs(tx - last_logged_x) > 4 || abs(ty - last_logged_y) > 4) {
+                LOG("TOUCH DRAG   x=%4d y=%4d", tx, ty);
+                last_logged_x = tx;
+                last_logged_y = ty;
+            }
+        } else if (!pressed && was_pressed) {
+            LOG("TOUCH RELEASE x=%4d y=%4d", last_logged_x, last_logged_y);
+            was_pressed = false;
+        }
+    }
+
+    /*
+     * Periodic heartbeat — proves the loop is running.
+     * Prints every 5 000 iterations ≈ every 10 seconds.
+     * Remove once system is confirmed stable.
+     */
+    loop_count++;
+    if (loop_count % 5000 == 0) {
+        LOG("heartbeat tick=%lu", HAL_GetTick());
+    }
   }
   /* USER CODE END 3 */
 }
 
-/**
-  * @brief System Clock Configuration
-  * @retval None
-  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -165,50 +211,17 @@ void SystemClock_Config(void)
     Error_Handler();
 }
 
-/* USER CODE BEGIN 4 */
-
-/*
- * Optional: DMA-based ADC interrupt path.
- *
- * If you configure ADC1 in DMA continuous mode, uncomment this callback
- * and remove the poll_adc_sample() call from spiro_process().
- *
- * extern uint16_t adc_dma_buf[2];
- *
- * void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
- * {
- *     if (hadc->Instance == ADC1) {
- *         spiro_push_sample(adc_dma_buf[0]);
- *     }
- * }
- *
- * void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
- * {
- *     if (hadc->Instance == ADC1) {
- *         spiro_push_sample(adc_dma_buf[0]);
- *     }
- * }
- */
-
-/* USER CODE END 4 */
-
-/**
-  * @brief  Error handler.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
   __disable_irq();
+  /* Log before halting so you can see which init step failed */
+  LOG("!!! ERROR_HANDLER called at tick=%lu !!!", HAL_GetTick());
   while (1) {}
-  /* USER CODE END Error_Handler_Debug */
 }
 
 #ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
   (void)file; (void)line;
-  /* USER CODE END 6 */
 }
-#endif /* USE_FULL_ASSERT */
+#endif

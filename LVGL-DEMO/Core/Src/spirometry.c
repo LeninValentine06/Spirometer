@@ -7,6 +7,7 @@
 
 #include "spirometry.h"
 #include "ui/screens.h"
+#include "spiro_classify.h"
 
 #include "stm32f4xx_hal.h"
 #include "adc.h"
@@ -14,6 +15,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+
+/* ── Patient parameters (set from patient screen before maneuver) ────────── */
+int   patient_sex       = 0;     /* 0 = Male, 1 = Female                    */
+float patient_age       = 25.0f; /* years                                    */
+float patient_height_cm = 170.0f;/* cm                                       */
 
 /* ── Forward declarations ───────────────────────────────────────────────── */
 static void     do_compute(void);
@@ -539,8 +545,16 @@ static void gui_update_metrics(void)
     }
     if (objects.sat_label)
         lv_label_set_text(objects.sat_label, s_result.saturated ? "SAT!" : "");
-    if (objects.validity_label)
-        lv_label_set_text(objects.validity_label, s_result.valid ? "OK" : "SHORT");
+    if (objects.validity_label) {
+        if (!s_result.valid) {
+            lv_label_set_text(objects.validity_label, "SHORT");
+        } else {
+            SpiroResult cls = spiro_classify(patient_sex, patient_age,
+                                             patient_height_cm,
+                                             s_result.fev1, s_result.fvc);
+            lv_label_set_text(objects.validity_label, cls.label);
+        }
+    }
 }
 
 /* ── gui_update_fvl_graph ───────────────────────────────────────────────── */
