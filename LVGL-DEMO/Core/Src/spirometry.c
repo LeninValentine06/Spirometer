@@ -7,6 +7,7 @@
 
 #include "spirometry.h"
 #include "ui/screens.h"
+#include "ui/ui.h"   /* for loadScreen() */
 #include "spiro_classify.h"
 
 #include "stm32f4xx_hal.h"
@@ -261,6 +262,81 @@ static void vt_draw_cb(lv_event_t *e)
     #undef VT_STEP
 }
 
+/* ── Live draw-post callback ────────────────────────────────────────────── */
+/*
+ * Draws the real-time flow-vs-time trace while SPIRO_STATE_ACQUIRING.
+ * Uses the live s_raw / s_vol buffers filled by spiro_push_sample().
+ * Fixed X axis: 0–8 s.  Fixed Y axis: 0–12 L/s.
+ * Redrawn every time live_push_sample() calls lv_obj_invalidate().
+ */
+static void live_draw_cb(lv_event_t *e)
+{
+    lv_obj_t   *obj   = lv_event_get_target(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    int32_t ox = coords.x1;
+    int32_t oy = coords.y1;
+    int32_t W  = coords.x2 - coords.x1;
+    int32_t H  = coords.y2 - coords.y1;
+
+    /* Grid */
+    lv_draw_line_dsc_t gdsc;
+    lv_draw_line_dsc_init(&gdsc);
+    gdsc.color = lv_color_hex(0x1e2a40);
+    gdsc.width = 1;
+    for (int g = 1; g <= 3; g++) {
+        gdsc.p1.x = ox;     gdsc.p1.y = oy + (H * g) / 4;
+        gdsc.p2.x = ox + W; gdsc.p2.y = oy + (H * g) / 4;
+        lv_draw_line(layer, &gdsc);
+        gdsc.p1.x = ox + (W * g) / 4; gdsc.p1.y = oy;
+        gdsc.p2.x = ox + (W * g) / 4; gdsc.p2.y = oy + H;
+        lv_draw_line(layer, &gdsc);
+    }
+
+    if (s_n < 2) return;
+
+    /* Fixed axis ranges for live view */
+    #define LIVE_T_MAX_MS  8000
+    #define LIVE_F_MAX_LPS 12000   /* mL/s units for integer math */
+    #define LIVE_STEP      4
+
+    lv_draw_line_dsc_t ldsc;
+    lv_draw_line_dsc_init(&ldsc);
+    ldsc.color       = lv_color_hex(0x00E5A0);
+    ldsc.width       = 2;
+    ldsc.round_start = 1;
+    ldsc.round_end   = 1;
+
+    bool    first = true;
+    int32_t px0 = 0, py0 = 0;
+
+    for (uint32_t i = 0; i < s_n; i++) {
+        if (i % LIVE_STEP != 0 && i != s_n - 1) continue;
+
+        float    fl  = raw_to_lps(s_raw[i]);
+        if (fl < 0.0f) fl = 0.0f;
+        int32_t t_ms = (int32_t)(i * (1000u / SPIRO_ADC_FS_HZ));
+
+        int32_t px1 = ox + (t_ms * W) / LIVE_T_MAX_MS;
+        int32_t py1 = oy + H - (int32_t)((fl * 1000.0f * H) / LIVE_F_MAX_LPS);
+        if (px1 < ox) px1 = ox; else if (px1 > ox + W) px1 = ox + W;
+        if (py1 < oy) py1 = oy; else if (py1 > oy + H) py1 = oy + H;
+
+        if (!first) {
+            ldsc.p1.x = px0; ldsc.p1.y = py0;
+            ldsc.p2.x = px1; ldsc.p2.y = py1;
+            lv_draw_line(layer, &ldsc);
+        }
+        px0 = px1; py0 = py1;
+        first = false;
+    }
+    #undef LIVE_T_MAX_MS
+    #undef LIVE_F_MAX_LPS
+    #undef LIVE_STEP
+}
+
 /* ── spiro_init ─────────────────────────────────────────────────────────── */
 void spiro_init(void)
 {
@@ -273,7 +349,8 @@ void spiro_init(void)
         lv_obj_add_event_cb(objects.fvl_chart, fvl_draw_cb, LV_EVENT_DRAW_POST, NULL);
     if (objects.vt_chart)
         lv_obj_add_event_cb(objects.vt_chart, vt_draw_cb, LV_EVENT_DRAW_POST, NULL);
-
+    if (objects.live_chart)
+        lv_obj_add_event_cb(objects.live_chart, live_draw_cb, LV_EVENT_DRAW_POST, NULL);
     gui_reset_display();
 }
 
@@ -340,10 +417,24 @@ void spiro_process(void)
     }
 
     case SPIRO_STATE_ACQUIRING: {
-        uint16_t raw  = poll_adc_sample();
+        uint16_t raw     = poll_adc_sample();
         spiro_push_sample(raw);
         float    flow    = raw_to_lps(raw);
         uint32_t elapsed = now - s_start_tick;
+
+        /* Update live readouts */
+        float vol_now = (s_n > 0) ? s_vol[s_n - 1] : 0.0f;
+        live_update_flow(flow, vol_now, elapsed);
+
+        /* Coaching message */
+        if (flow < 1.0f && elapsed > 500)
+            live_set_coaching("KEEP GOING!");
+        else if (flow >= 4.0f)
+            live_set_coaching("KEEP EXHALING");
+        else
+            live_set_coaching("BLOW HARDER!");
+
+        live_push_sample(flow);
 
         if (elapsed >= SPIRO_MAX_DURATION_MS || s_n >= SPIRO_BUF_MAX_SAMPLES) {
             s_state = SPIRO_STATE_COMPUTING;
@@ -364,6 +455,8 @@ void spiro_process(void)
         gui_update_metrics();
         gui_update_fvl_graph();
         gui_update_vt_graph();
+        /* Navigate to Results screen */
+        loadScreen(SCREEN_ID_RESULTS);
         s_state = SPIRO_STATE_DISPLAYING;
         break;
 

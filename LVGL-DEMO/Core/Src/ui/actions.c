@@ -1,34 +1,57 @@
 /*
- * actions.c
- *
- *  Created on: Feb 23, 2026
- *      Author: lenin
+ * actions.c  —  SpiroFlow navigation actions
  */
-
 
 #include "actions.h"
 #include "ui.h"
 #include "screens.h"
 
-// Called by the nav buttonmatrix on scr_home
-// Routes each button index to the correct screen
-void action_change_screen(lv_event_t *e)
-{
-    lv_obj_t *btnmatrix = lv_event_get_target(e);
-    uint32_t btn_id = lv_buttonmatrix_get_selected_button(btnmatrix);
+/* ── Dashboard ──────────────────────────────────────────────────────────── */
 
-    switch (btn_id) {
-        case 0: loadScreen(SCREEN_ID_SCR_HOME);  break;
-        case 1: loadScreen(SCREEN_ID_HISTORY);   break;
-        case 2: loadScreen(SCREEN_ID_PATIENT);   break;
-        case 3: loadScreen(SCREEN_ID_SETTINGS);  break;
-        default: break;
-    }
+void action_start_test(lv_event_t *e)
+{
+    (void)e;
+    loadScreen(SCREEN_ID_COUNTDOWN);
+    countdown_start();
 }
 
-// Convenience shortcut — navigate directly to History screen
+void action_go_to_dashboard(lv_event_t *e)
+{
+    (void)e;
+    loadScreen(SCREEN_ID_DASHBOARD);
+}
+
+/* ── Results carousel ────────────────────────────────────────────────────── */
+
+void action_go_to_results(lv_event_t *e)
+{
+    (void)e;
+    loadScreen(SCREEN_ID_RESULTS);
+}
+
+void action_go_to_fvl(lv_event_t *e)
+{
+    (void)e;
+    loadScreen(SCREEN_ID_FVL);
+}
+
+void action_go_to_vt(lv_event_t *e)
+{
+    (void)e;
+    loadScreen(SCREEN_ID_VT);
+}
+
+/* ── Legacy shims ────────────────────────────────────────────────────────── */
+
+void action_change_screen(lv_event_t *e)
+{
+    /* Old buttonmatrix nav — redirect all to dashboard */
+    (void)e;
+    loadScreen(SCREEN_ID_DASHBOARD);
+}
+
 void action_go_to_history(lv_event_t *e)
 {
     (void)e;
-    loadScreen(SCREEN_ID_HISTORY);
+    loadScreen(SCREEN_ID_VT);   /* History → Volume-Time screen */
 }
