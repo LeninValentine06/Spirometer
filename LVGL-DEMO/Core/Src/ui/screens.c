@@ -47,14 +47,6 @@ static lv_obj_t *make_chart_obj(lv_obj_t *parent,
 
 /* =========================================================================
  * scr_home  (240x320)
- *
- * Vertical flex column — no negative positioning, no overflow:
- *   Status bar   24 px
- *   Title row    28 px
- *   Metric grid 130 px
- *   FVL area    106 px
- *   Nav bar      32 px
- *   Total       320 px
  * ========================================================================= */
 void create_screen_scr_home(void)
 {
@@ -66,6 +58,7 @@ void create_screen_scr_home(void)
     lv_obj_set_style_pad_all(obj,      0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_radius(obj,       0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_layout(obj,          LV_LAYOUT_FLEX,      LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_flex_flow(obj,       LV_FLEX_FLOW_COLUMN,  LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -83,6 +76,7 @@ void create_screen_scr_home(void)
             lv_obj_set_style_pad_left(o,8,0); lv_obj_set_style_pad_right(o,8,0);
             lv_obj_set_style_pad_top(o,0,0);  lv_obj_set_style_pad_bottom(o,0,0);
             lv_obj_set_style_border_width(o,0,0); lv_obj_set_style_radius(o,0,0);
+            lv_obj_set_style_shadow_width(o,0,0);
             lv_obj_set_style_bg_color(o, lv_color_hex(0xff111620), 0);
             lv_obj_set_style_layout(o, LV_LAYOUT_FLEX, 0);
             lv_obj_set_style_flex_flow(o, LV_FLEX_FLOW_ROW, 0);
@@ -102,6 +96,7 @@ void create_screen_scr_home(void)
             lv_obj_set_style_pad_left(o,8,0); lv_obj_set_style_pad_right(o,8,0);
             lv_obj_set_style_pad_top(o,0,0);  lv_obj_set_style_pad_bottom(o,0,0);
             lv_obj_set_style_bg_opa(o,0,0); lv_obj_set_style_border_width(o,0,0); lv_obj_set_style_radius(o,0,0);
+            lv_obj_set_style_shadow_width(o,0,0);
             lv_obj_set_style_layout(o, LV_LAYOUT_FLEX, 0);
             lv_obj_set_style_flex_flow(o, LV_FLEX_FLOW_ROW, 0);
             lv_obj_set_style_flex_main_place(o, LV_FLEX_ALIGN_SPACE_BETWEEN, 0);
@@ -112,12 +107,13 @@ void create_screen_scr_home(void)
             { lv_obj_t *l=lv_label_create(o); lv_obj_set_size(l,LV_SIZE_CONTENT,LV_SIZE_CONTENT); add_style_style_label_secondary(l); lv_label_set_text(l,"ADULT"); }
         }
 
-        /* ---- 2x2 metric grid 130 px ---- */
+        /* ---- 2x2 metric grid 116 px ---- */
         {
             lv_obj_t *o = lv_obj_create(parent_obj);
             objects.obj1 = o;
             lv_obj_set_size(o, 240, 116);
             lv_obj_set_style_bg_opa(o,0,0); lv_obj_set_style_border_width(o,0,0); lv_obj_set_style_radius(o,0,0);
+            lv_obj_set_style_shadow_width(o,0,0);
             lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_style_layout(o, LV_LAYOUT_GRID, 0);
             { static lv_coord_t r[]={LV_GRID_FR(1),LV_GRID_FR(1),LV_GRID_TEMPLATE_LAST};
@@ -135,6 +131,7 @@ void create_screen_scr_home(void)
     lv_obj_t *t=lv_obj_create(p); \
     lv_obj_set_style_pad_all(t,6,0); lv_obj_set_style_radius(t,0,0); \
     lv_obj_remove_flag(t,LV_OBJ_FLAG_SCROLLABLE); \
+    lv_obj_set_style_shadow_width(t,0,0); \
     add_style_style_tile(t); lv_obj_set_style_border_width(t,2,0); \
     lv_obj_set_style_grid_cell_column_pos(t,col,0); lv_obj_set_style_grid_cell_row_pos(t,row,0); \
     lv_obj_set_style_grid_cell_column_span(t,1,0); lv_obj_set_style_grid_cell_row_span(t,1,0); \
@@ -174,17 +171,7 @@ void create_screen_scr_home(void)
             }
         }
 
-        /* =========================================================
-         * FVL chart area  120 px tall (grid shrunk to 116 to compensate)
-         *
-         * Layout (container-relative, montserrat_10 for axis labels):
-         *   Chart canvas  x=26 y=0   w=210 h=100   shadow=0, no children
-         *   Y-unit "L/s"  x=0  y=0   w=24  h=10
-         *   Y-val labels  x=0  y=0/25/50/75  w=24 h=10  (right-aligned)
-         *   X-val labels  x=*  y=101 w=26  h=10  (4 labels below chart)
-         *   X-unit label  x=26 y=101 w=210 h=10  (centred, dim)
-         *   Param strip   y=111..119  Te|TPEF|FEF2575|FEF50|SAT|OK
-         * ========================================================= */
+        /* ---- FVL chart area 120 px ---- */
         {
             lv_obj_t *o = lv_obj_create(parent_obj);
             lv_obj_set_size(o, 240, 120);
@@ -192,15 +179,14 @@ void create_screen_scr_home(void)
             lv_obj_set_style_bg_color(o,lv_color_hex(0xff0b0e14),0);
             lv_obj_set_style_bg_opa(o,255,0);
             lv_obj_set_style_border_width(o,0,0); lv_obj_set_style_radius(o,0,0);
+            lv_obj_set_style_shadow_width(o,0,0);
             lv_obj_set_style_flex_grow(o,0,0);
             lv_obj_remove_flag(o,LV_OBJ_FLAG_SCROLLABLE);
             {
                 lv_obj_t *p = o;
 
-                /* Chart canvas: x=26 y=0 w=210 h=100, no children, shadow=0 */
                 objects.fvl_chart = make_chart_obj(p, 26, 0, 210, 100);
 
-                /* Wait label — sibling of chart, centred over it */
                 { lv_obj_t *l=lv_label_create(p); objects.fvl_wait_lbl=l;
                   lv_obj_set_pos(l,26,43); lv_obj_set_size(l,210,14);
                   lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);
@@ -208,14 +194,12 @@ void create_screen_scr_home(void)
                   lv_obj_set_style_text_font(l,&lv_font_montserrat_14,0);
                   lv_obj_set_style_bg_opa(l,0,0); lv_label_set_text(l,"Blow to see graph"); }
 
-                /* Y-axis unit label top-left */
                 { lv_obj_t *l=lv_label_create(p); lv_obj_set_pos(l,0,0); lv_obj_set_size(l,24,10);
                   lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_RIGHT,0);
                   lv_obj_set_style_text_color(l,lv_color_hex(0xff00d4ff),0);
                   lv_obj_set_style_text_font(l,&lv_font_montserrat_10,0);
                   lv_obj_set_style_bg_opa(l,0,0); lv_label_set_text(l,"L/s"); }
 
-                /* Y-axis value labels — spaced across 100px chart height */
                 { static const int16_t yp[4]={0,25,50,75};
                   static const char *yi[4]={"--","--","--"," 0"};
                   for(int i=0;i<4;i++){
@@ -228,7 +212,6 @@ void create_screen_scr_home(void)
                   }
                 }
 
-                /* X-axis value labels below chart at y=101 */
                 { static const int16_t xp[4]={13,83,153,223};
                   static const char *xi[4]={"0","-","-","-"};
                   for(int i=0;i<4;i++){
@@ -241,9 +224,6 @@ void create_screen_scr_home(void)
                   }
                 }
 
-                /* X-axis unit removed — value numbers with axis context are sufficient */
-
-                /* Param strip y=111: Te | TPEF | FEF2575 | FEF50 | SAT | STATUS */
                 { lv_obj_t *l=lv_label_create(p); objects.te_val=l;       lv_obj_set_pos(l,26, 111); lv_obj_set_size(l,42,10); add_style_style_label_primary(l);   lv_obj_set_style_text_font(l,&lv_font_montserrat_10,0); lv_label_set_text(l,"--"); }
                 { lv_obj_t *l=lv_label_create(p); objects.tpef_val=l;     lv_obj_set_pos(l,70, 111); lv_obj_set_size(l,42,10); add_style_style_label_primary(l);   lv_obj_set_style_text_font(l,&lv_font_montserrat_10,0); lv_label_set_text(l,"--"); }
                 { lv_obj_t *l=lv_label_create(p); objects.fef2575_val=l;  lv_obj_set_pos(l,114,111); lv_obj_set_size(l,48,10); add_style_style_label_secondary(l); lv_obj_set_style_text_font(l,&lv_font_montserrat_10,0); lv_label_set_text(l,"--"); }
@@ -263,6 +243,7 @@ void create_screen_scr_home(void)
             lv_obj_set_style_bg_opa(o,255,0);
             lv_obj_set_style_border_width(o,1,0);
             lv_obj_set_style_border_color(o,lv_color_hex(0xff1e2a40),0);
+            lv_obj_set_style_shadow_width(o,0,0);
             lv_obj_set_style_flex_grow(o,0,0);
             lv_obj_remove_flag(o,LV_OBJ_FLAG_SCROLLABLE);
             {
@@ -311,6 +292,7 @@ void create_screen_history(void)
     lv_obj_set_pos(obj,0,0); lv_obj_set_size(obj,240,320);
     lv_obj_set_style_bg_color(obj,lv_color_hex(0xff0b0e14),0);
     lv_obj_set_style_pad_all(obj,0,0); lv_obj_set_style_border_width(obj,0,0); lv_obj_set_style_radius(obj,0,0);
+    lv_obj_set_style_shadow_width(obj,0,0);
     lv_obj_remove_flag(obj,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_layout(obj,LV_LAYOUT_FLEX,0);
     lv_obj_set_style_flex_flow(obj,LV_FLEX_FLOW_COLUMN,0);
@@ -324,6 +306,7 @@ void create_screen_history(void)
           lv_obj_set_style_pad_left(o,8,0); lv_obj_set_style_pad_right(o,8,0);
           lv_obj_set_style_pad_top(o,0,0); lv_obj_set_style_pad_bottom(o,0,0);
           lv_obj_set_style_border_width(o,0,0); lv_obj_set_style_radius(o,0,0);
+          lv_obj_set_style_shadow_width(o,0,0);
           lv_obj_set_style_bg_color(o,lv_color_hex(0xff111620),0);
           lv_obj_set_style_layout(o,LV_LAYOUT_FLEX,0); lv_obj_set_style_flex_flow(o,LV_FLEX_FLOW_ROW,0);
           lv_obj_set_style_flex_main_place(o,LV_FLEX_ALIGN_SPACE_BETWEEN,0);
@@ -338,6 +321,7 @@ void create_screen_history(void)
           lv_obj_set_style_pad_all(o,0,0);
           lv_obj_set_style_bg_color(o,lv_color_hex(0xff0b0e14),0); lv_obj_set_style_bg_opa(o,255,0);
           lv_obj_set_style_border_width(o,0,0); lv_obj_set_style_radius(o,0,0);
+          lv_obj_set_style_shadow_width(o,0,0);
           lv_obj_set_style_flex_grow(o,0,0); lv_obj_remove_flag(o,LV_OBJ_FLAG_SCROLLABLE);
           { lv_obj_t *p=o;
             /* Y unit */
@@ -358,9 +342,9 @@ void create_screen_history(void)
                   lv_obj_set_style_bg_opa(l,0,0); lv_label_set_text(l,yi[i]);
               }
             }
-            /* Chart canvas — no children, shadow zeroed */
+            /* Chart canvas */
             objects.vt_chart=make_chart_obj(p,22,16,214,148);
-            /* Wait label — sibling of chart */
+            /* Wait label */
             { lv_obj_t *l=lv_label_create(p); objects.vt_wait_lbl=l;
               lv_obj_set_pos(l,22,82); lv_obj_set_size(l,214,14);
               lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);
@@ -393,11 +377,17 @@ void create_screen_history(void)
           lv_obj_set_style_pad_all(o,0,0); lv_obj_set_style_radius(o,0,0);
           lv_obj_set_style_bg_color(o,lv_color_hex(0xff0b1220),0); lv_obj_set_style_bg_opa(o,255,0);
           lv_obj_set_style_border_width(o,1,0); lv_obj_set_style_border_color(o,lv_color_hex(0xff1e2a40),0);
+          lv_obj_set_style_shadow_width(o,0,0);
           lv_obj_set_style_flex_grow(o,0,0); lv_obj_remove_flag(o,LV_OBJ_FLAG_SCROLLABLE);
           { lv_obj_t *btnm=lv_buttonmatrix_create(o);
             lv_obj_set_pos(btnm,0,0); lv_obj_set_size(btnm,240,32);
             static const char *map[5]={"Home","History","Patient","Settings",NULL};
-            static lv_buttonmatrix_ctrl_t ctrl_map[4]={1|LV_BUTTONMATRIX_CTRL_CHECKABLE,1|LV_BUTTONMATRIX_CTRL_CHECKABLE|LV_BUTTONMATRIX_CTRL_CHECKED,1|LV_BUTTONMATRIX_CTRL_CHECKABLE,1|LV_BUTTONMATRIX_CTRL_CHECKABLE};
+            static lv_buttonmatrix_ctrl_t ctrl_map[4]={
+                1|LV_BUTTONMATRIX_CTRL_CHECKABLE,
+                1|LV_BUTTONMATRIX_CTRL_CHECKABLE|LV_BUTTONMATRIX_CTRL_CHECKED,
+                1|LV_BUTTONMATRIX_CTRL_CHECKABLE,
+                1|LV_BUTTONMATRIX_CTRL_CHECKABLE
+            };
             lv_buttonmatrix_set_map(btnm,map); lv_buttonmatrix_set_ctrl_map(btnm,ctrl_map);
             lv_buttonmatrix_set_one_checked(btnm,true);
             lv_obj_add_event_cb(btnm,action_change_screen,LV_EVENT_VALUE_CHANGED,NULL);
@@ -419,21 +409,37 @@ void create_screen_history(void)
 }
 void tick_screen_history(void) {}
 
+/* =========================================================================
+ * Patient screen (240x320)
+ * ========================================================================= */
 void create_screen_patient(void)
 {
     lv_obj_t *obj=lv_obj_create(0); objects.patient=obj;
     lv_obj_set_pos(obj,0,0); lv_obj_set_size(obj,240,320);
     lv_obj_set_style_bg_color(obj,lv_color_hex(0xff0b0e14),0);
+    lv_obj_set_style_pad_all(obj,0,0);
+    lv_obj_set_style_border_width(obj,0,0);
+    lv_obj_set_style_radius(obj,0,0);
+    lv_obj_set_style_shadow_width(obj,0,0);
+    lv_obj_remove_flag(obj,LV_OBJ_FLAG_SCROLLABLE);
     { lv_obj_t *l=lv_label_create(obj); lv_obj_set_pos(l,80,128); lv_obj_set_size(l,LV_SIZE_CONTENT,LV_SIZE_CONTENT); add_style_style_label_primary(l); lv_label_set_text(l,"Patient"); }
     tick_screen_patient();
 }
 void tick_screen_patient(void) {}
 
+/* =========================================================================
+ * Settings screen (240x320)
+ * ========================================================================= */
 void create_screen_settings(void)
 {
     lv_obj_t *obj=lv_obj_create(0); objects.settings=obj;
     lv_obj_set_pos(obj,0,0); lv_obj_set_size(obj,240,320);
     lv_obj_set_style_bg_color(obj,lv_color_hex(0xff0b0e14),0);
+    lv_obj_set_style_pad_all(obj,0,0);
+    lv_obj_set_style_border_width(obj,0,0);
+    lv_obj_set_style_radius(obj,0,0);
+    lv_obj_set_style_shadow_width(obj,0,0);
+    lv_obj_remove_flag(obj,LV_OBJ_FLAG_SCROLLABLE);
     { lv_obj_t *l=lv_label_create(obj); lv_obj_set_pos(l,80,128); lv_obj_set_size(l,LV_SIZE_CONTENT,LV_SIZE_CONTENT); add_style_style_label_primary(l); lv_label_set_text(l,"Settings"); }
     tick_screen_settings();
 }
@@ -443,7 +449,7 @@ typedef void (*tick_screen_func_t)(void);
 static tick_screen_func_t tick_screen_funcs[]={
     tick_screen_scr_home,tick_screen_history,tick_screen_patient,tick_screen_settings
 };
-void tick_screen(int i)              { tick_screen_funcs[i](); }
+void tick_screen(int i)               { tick_screen_funcs[i](); }
 void tick_screen_by_id(enum ScreensEnum id){ tick_screen_funcs[id-1](); }
 
 ext_font_desc_t fonts[]={

@@ -78,7 +78,7 @@ extern "C" {
  * Raw ADC stored as uint16_t (2 bytes each) to minimise RAM.
  * Integrated volume stored as float (4 bytes each).
  * Total static BSS: 1232*(2+4) = 7392 bytes (~7.2 KB).             */
-#define SPIRO_BUF_MAX_SAMPLES  1232u
+#define SPIRO_BUF_MAX_SAMPLES  1650u
 
 /* FVL graph canvas dimensions (must match screens.c fvl_chart geometry) */
 #define SPIRO_FVL_W   180
