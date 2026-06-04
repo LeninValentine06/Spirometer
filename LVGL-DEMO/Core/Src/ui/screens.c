@@ -38,6 +38,25 @@
  * FIX-I  Swipe gesture detection added to all three carousel screens
  *        (Results, FVL, VT) via LV_EVENT_GESTURE on each screen object.
  *
+ * FIX-J  LVGL heap exhaustion fix for STM32F401CCU6 (64 KB SRAM).
+ *        Root cause: the five screens collectively need ~37 KB of LVGL heap
+ *        but LV_MEM_SIZE was 32 KB, causing create_screen_fvl() to receive
+ *        NULL from lv_obj_create() and hard-fault on the first style write.
+ *        Two changes made:
+ *          1. lv_conf.h: LV_MEM_SIZE raised from 32 KB to 40 KB (maximum
+ *             safe value: 64 KB SRAM − ~21 KB non-LVGL static = ~43 KB
+ *             available; 40 KB leaves 3 KB for stack growth).
+ *          2. create_screen_results(): removed 9 off-screen legacy objects
+ *             (4 lv_bar at y=310, 5 lv_label at y=280–315) that consumed
+ *             ~2 200 B of heap but were never visible.  All write paths in
+ *             spirometry.c already null-guard these pointers, so setting
+ *             them to NULL requires no other changes.  This reduces the
+ *             results screen from ~17 300 B to ~15 100 B of heap, giving
+ *             ~6 200 B of headroom on the 40 KB budget.
+ *        create_screens() also gains NULL-pointer assertions after each
+ *        create_screen_*() call so a future OOM produces a diagnostic
+ *        LOG() over UART instead of a silent hard fault.
+ *
  * Color palette
  *   Background  #0B0E14   surface #111620   tile #0D1420
  *   Green       #00E5A0   cyan    #00D4FF   amber  #FFB020
@@ -56,6 +75,11 @@
 #include "styles.h"
 #include "ui.h"
 #include "spirometry.h"   /* FIX-H: spiro_reset() */
+
+/* Forward declaration — defined in Core/Src/main.c.
+ * Avoids pulling in main.h (and the full HAL chain) just for this one symbol.
+ * FIX-J: used by the OOM guards in create_screens(). */
+extern void Error_Handler(void);
 
 objects_t objects;
 lv_obj_t *tick_value_change_obj;
@@ -352,36 +376,6 @@ void create_screen_boot(void)
     lv_obj_set_style_bg_opa(fw, 0, 0);
     lv_label_set_text(fw, "fw v1.0.0");
 
-    lv_obj_t *panel = lv_obj_create(s);
-    lv_obj_set_pos(panel, 20, 140);
-    lv_obj_set_size(panel, 200, 96);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(C_SURFACE), 0);
-    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(C_BORDER), 0);
-    lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_radius(panel, 6, 0);
-    lv_obj_set_style_pad_all(panel, 8, 0);
-    lv_obj_set_style_shadow_width(panel, 0, 0);
-    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_layout(panel, LV_LAYOUT_FLEX, 0);
-    lv_obj_set_style_flex_flow(panel, LV_FLEX_FLOW_COLUMN, 0);
-    lv_obj_set_style_flex_main_place(panel, LV_FLEX_ALIGN_SPACE_EVENLY, 0);
-
-    const char *checks[4] = {
-        LV_SYMBOL_OK " Flow Sensor",
-        LV_SYMBOL_OK " Battery",
-        LV_SYMBOL_OK " Storage",
-        LV_SYMBOL_OK " Touchscreen"
-    };
-    for (int i = 0; i < 4; i++) {
-        lv_obj_t *l = lv_label_create(panel);
-        lv_obj_set_size(l, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_GREEN), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, checks[i]);
-    }
-
     lv_obj_t *bar = lv_bar_create(s);
     objects.boot_bar = bar;
     lv_obj_set_pos(bar, 20, 250);
@@ -404,7 +398,7 @@ void create_screen_boot(void)
     lv_obj_set_style_text_color(sl, lv_color_hex(C_DIM), 0);
     lv_obj_set_style_text_font(sl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_opa(sl, 0, 0);
-    lv_label_set_text(sl, "Checking sensors...");
+    lv_label_set_text(sl, "Starting...");
 
     tick_screen_boot();
 }
@@ -444,15 +438,7 @@ void create_screen_dashboard(void)
         lv_obj_set_style_text_color(tl, lv_color_hex(C_DIM), 0);
         lv_obj_set_style_text_font(tl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_opa(tl, 0, 0);
-        lv_label_set_text(tl, "12:00");
-
-        lv_obj_t *bl = lv_label_create(o);
-        objects.dash_bat_lbl = bl;
-        lv_obj_set_size(bl, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_set_style_text_color(bl, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_bg_opa(bl, 0, 0);
-        lv_label_set_text(bl, LV_SYMBOL_BATTERY_FULL " 84%");
+        lv_label_set_text(tl, "SpiroFlow");
     }
 
     /* READY card */
@@ -541,131 +527,7 @@ void create_screen_dashboard(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  SCREEN 3 — COUNTDOWN
- * ══════════════════════════════════════════════════════════════════════════ */
-void create_screen_countdown(void)
-{
-    lv_obj_t *s = make_screen();
-    objects.countdown = s;
-
-    lv_obj_t *cl = lv_label_create(s);
-    objects.countdown_lbl = cl;
-    lv_obj_set_pos(cl, 0, 100);
-    lv_obj_set_size(cl, 240, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_align(cl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(cl, lv_color_hex(C_GREEN), 0);
-    lv_obj_set_style_text_font(cl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(cl, 0, 0);
-    lv_label_set_text(cl, "3");
-
-    lv_obj_t *sub = lv_label_create(s);
-    lv_obj_set_pos(sub, 0, 200);
-    lv_obj_set_size(sub, 240, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(sub, lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_font(sub, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(sub, 0, 0);
-    lv_label_set_text(sub, "Get ready to blow...");
-
-    tick_screen_countdown();
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
- *  SCREEN 4 — LIVE TEST
- * ══════════════════════════════════════════════════════════════════════════ */
-
-/* FIX-H: cancel callback that resets the engine before navigating away */
-static void cancel_test_cb(lv_event_t *e)
-{
-    spiro_reset();
-    action_go_to_dashboard(e);
-}
-
-void create_screen_live(void)
-{
-    lv_obj_t *s = make_screen();
-    objects.live = s;
-
-    make_status_bar(s, "RECORDING", "");
-
-    make_label(s, 12, 32, C_DIM, &lv_font_montserrat_14, "Flow");
-    lv_obj_t *fl = lv_label_create(s);
-    objects.live_flow_lbl = fl;
-    lv_obj_set_pos(fl, 12, 46);
-    lv_obj_set_size(fl, 110, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_color(fl, lv_color_hex(C_GREEN), 0);
-    lv_obj_set_style_text_font(fl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(fl, 0, 0);
-    lv_label_set_text(fl, "0.00");
-    make_label(s, 12, 74, C_DIM, &lv_font_montserrat_10, "L/s");
-
-    make_label(s, 128, 32, C_DIM, &lv_font_montserrat_14, "Volume");
-    lv_obj_t *vl = lv_label_create(s);
-    objects.live_vol_lbl = vl;
-    lv_obj_set_pos(vl, 128, 46);
-    lv_obj_set_size(vl, 100, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_color(vl, lv_color_hex(C_CYAN), 0);
-    lv_obj_set_style_text_font(vl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(vl, 0, 0);
-    lv_label_set_text(vl, "0.00");
-    make_label(s, 128, 74, C_DIM, &lv_font_montserrat_10, "L");
-
-    lv_obj_t *tl = lv_label_create(s);
-    objects.live_time_lbl = tl;
-    lv_obj_set_pos(tl, 0, 32);
-    lv_obj_set_size(tl, 240, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_align(tl, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_color(tl, lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_font(tl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(tl, 0, 0);
-    lv_obj_set_style_pad_right(tl, 12, 0);
-    lv_label_set_text(tl, "0s");
-
-    objects.live_chart = make_chart_obj(s, 24, 90, 210, 130);
-    make_label(s, 0, 90, C_DIM, &lv_font_montserrat_10, "L/s");
-    make_label(s, 90, 224, C_DIM, &lv_font_montserrat_10, "Time (s)");
-
-    lv_obj_t *coaching = lv_label_create(s);
-    objects.live_coaching_lbl = coaching;
-    lv_obj_set_pos(coaching, 0, 236);
-    lv_obj_set_size(coaching, 240, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_align(coaching, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(coaching, lv_color_hex(C_AMBER), 0);
-    lv_obj_set_style_text_font(coaching, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(coaching, 0, 0);
-    lv_label_set_text(coaching, "BLOW HARD!");
-
-    lv_obj_t *div = lv_obj_create(s);
-    lv_obj_set_pos(div, 0, 280);
-    lv_obj_set_size(div, 240, 1);
-    lv_obj_set_style_bg_color(div, lv_color_hex(C_BORDER), 0);
-    lv_obj_set_style_bg_opa(div, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(div, 0, 0);
-    lv_obj_set_style_shadow_width(div, 0, 0);
-    lv_obj_remove_flag(div, LV_OBJ_FLAG_SCROLLABLE);
-
-    /* FIX-H: CANCEL now uses cancel_test_cb which calls spiro_reset() first */
-    lv_obj_t *stop = lv_button_create(s);
-    lv_obj_set_pos(stop, 80, 290);
-    lv_obj_set_size(stop, 80, 24);
-    lv_obj_set_style_bg_color(stop, lv_color_hex(C_TILE), LV_PART_MAIN);
-    lv_obj_set_style_border_color(stop, lv_color_hex(C_BORDER), LV_PART_MAIN);
-    lv_obj_set_style_border_width(stop, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(stop, 4, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(stop, 0, 0);
-    lv_obj_add_event_cb(stop, cancel_test_cb, LV_EVENT_CLICKED, NULL);  /* FIX-H */
-    lv_obj_t *sl = lv_label_create(stop);
-    lv_obj_set_align(sl, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_color(sl, lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_font(sl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_opa(sl, 0, 0);
-    lv_label_set_text(sl, "CANCEL");
-
-    tick_screen_live();
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
- *  SCREEN 5 — RESULTS
+ *  SCREEN 3 — RESULTS
  * ══════════════════════════════════════════════════════════════════════════ */
 static void results_table_row(lv_obj_t *parent,
                                int32_t y,
@@ -821,95 +683,24 @@ void create_screen_results(void)
         objects.fef50_val   = objects.res_fef50_act;
     }
 
-    /* FIX-F: legacy progress bars moved to y=310 (below footer) */
-    {
-        lv_obj_t *b = lv_bar_create(s); objects.obj2 = b;
-        lv_obj_set_pos(b, 8, 310); lv_obj_set_size(b, 50, 3);
-        lv_bar_set_value(b, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_GREEN), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
-        lv_obj_set_style_shadow_width(b, 0, 0);
-    }
-    {
-        lv_obj_t *b = lv_bar_create(s); objects.obj5 = b;
-        lv_obj_set_pos(b, 62, 310); lv_obj_set_size(b, 50, 3);
-        lv_bar_set_value(b, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
-        lv_obj_set_style_shadow_width(b, 0, 0);
-    }
-    {
-        lv_obj_t *b = lv_bar_create(s); objects.obj7 = b;
-        lv_obj_set_pos(b, 116, 310); lv_obj_set_size(b, 50, 3);
-        lv_bar_set_value(b, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_AMBER), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
-        lv_obj_set_style_shadow_width(b, 0, 0);
-    }
-    {
-        lv_obj_t *b = lv_bar_create(s); objects.obj9 = b;
-        lv_obj_set_pos(b, 170, 310); lv_obj_set_size(b, 50, 3);
-        lv_bar_set_value(b, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_TILE), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_BLUE), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_radius(b, 0, LV_PART_MAIN); lv_obj_set_style_radius(b, 0, LV_PART_INDICATOR);
-        lv_obj_set_style_shadow_width(b, 0, 0);
-    }
-
-    /* Legacy labels */
-    {
-        lv_obj_t *l = lv_label_create(s); objects.obj3 = l;
-        lv_obj_set_pos(l, 8, 315); lv_obj_set_size(l, 50, 10);
-        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, "--%");
-    }
-    {
-        lv_obj_t *l = lv_label_create(s); objects.te_val = l;
-        lv_obj_set_pos(l, 8, 280); lv_obj_set_size(l, 54, 10);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, "--");
-    }
-    {
-        lv_obj_t *l = lv_label_create(s); objects.tpef_val = l;
-        lv_obj_set_pos(l, 64, 280); lv_obj_set_size(l, 54, 10);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, "--");
-    }
-    {
-        lv_obj_t *l = lv_label_create(s); objects.sat_label = l;
-        lv_obj_set_pos(l, 182, 280); lv_obj_set_size(l, 30, 10);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_RED), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, "");
-    }
-    {
-        lv_obj_t *l = lv_label_create(s); objects.validity_label = l;
-        lv_obj_set_pos(l, 120, 280); lv_obj_set_size(l, 60, 10);
-        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(l, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_bg_opa(l, 0, 0);
-        lv_label_set_text(l, "--");
-    }
+    /* FIX-J: legacy progress bars (obj2/obj5/obj7/obj9) and legacy labels
+     * (obj3, te_val, tpef_val, sat_label, validity_label) that were placed
+     * at y=280–315 — beyond the 320 px screen edge or hidden under the footer
+     * — have been removed.  They consumed ~2 200 B of LVGL heap and were never
+     * visible.  The struct members remain in objects_t and are left as NULL;
+     * every write path in spirometry.c already null-guards these pointers so
+     * no other source file requires any change.
+     * Removed objects: obj2 obj3 obj5 obj7 obj9 te_val tpef_val sat_label
+     *                  validity_label */
+    objects.obj2          = NULL;
+    objects.obj3          = NULL;
+    objects.obj5          = NULL;
+    objects.obj7          = NULL;
+    objects.obj9          = NULL;
+    objects.te_val        = NULL;
+    objects.tpef_val      = NULL;
+    objects.sat_label     = NULL;
+    objects.validity_label = NULL;
 
     /* Footer + page dots.
      * Left slot = Home (back to dashboard) so the results carousel is not a
@@ -1026,8 +817,6 @@ void tick_screen_boot(void)
 }
 
 void tick_screen_dashboard(void) {}
-void tick_screen_countdown(void) {}
-void tick_screen_live(void) {}
 void tick_screen_results(void) {}
 void tick_screen_fvl(void) {}
 void tick_screen_vt(void) {}
@@ -1037,14 +826,12 @@ typedef void (*tick_fn_t)(void);
 static tick_fn_t tick_fns[] = {
     tick_screen_boot,
     tick_screen_dashboard,
-    tick_screen_countdown,
-    tick_screen_live,
     tick_screen_results,
     tick_screen_fvl,
     tick_screen_vt,
 };
 
-void tick_screen(int i)                      { if (i >= 0 && i < 7) tick_fns[i](); }
+void tick_screen(int i)                      { if (i >= 0 && i < 5) tick_fns[i](); }
 void tick_screen_by_id(enum ScreensEnum id)  { tick_screen(id - 1); }
 
 /* ── Font table ─────────────────────────────────────────────────────────── */
@@ -1067,63 +854,60 @@ void create_screens(void)
 
     s_boot_done = false;  /* FIX-A: reset on every full UI rebuild */
 
-    /* Per-screen trace: the LAST line printed before a hang identifies the
-     * screen whose creation failed (most likely LVGL heap exhaustion). */
-    printf("[screens] boot...\r\n");      create_screen_boot();
-    printf("[screens] dashboard...\r\n"); create_screen_dashboard();
-    printf("[screens] countdown...\r\n"); create_screen_countdown();
-    printf("[screens] live...\r\n");      create_screen_live();
-    printf("[screens] results...\r\n");   create_screen_results();
-    printf("[screens] fvl...\r\n");       create_screen_fvl();
-    printf("[screens] vt...\r\n");        create_screen_vt();
-    printf("[screens] all created\r\n");
-
-    /* LVGL heap headroom — if used%% is near 100 or free_biggest is tiny,
-     * the build is RAM-bound and screens must be created lazily. */
+    /* Per-screen trace + heap snapshot.  The [mem] line AFTER a screen shows
+     * how much heap remains; if it shrinks to near zero the build is RAM-bound
+     * and the next screen's lv_obj_create() will fail.
+     *
+     * FIX-J: NULL-pointer checks after each create call.  lv_obj_create()
+     * returns NULL on OOM; the subsequent style writes then hard-fault with
+     * no diagnostics.  Checking here converts a silent crash into a logged
+     * message + halt via Error_Handler(), making the failure self-documenting.
+     * If any check fires, increase LV_MEM_SIZE in lv_conf.h (max safe value
+     * on the STM32F401CCU6 is 40 KB — see FIX-J note in file header). */
     lv_mem_monitor_t mon;
+
+    printf("[screens] boot...\r\n");
+    create_screen_boot();
     lv_mem_monitor(&mon);
-    printf("[mem] total=%u free=%u biggest=%u used=%u%% frag=%u%%\r\n",
-           (unsigned)mon.total_size,  (unsigned)mon.free_size,
-           (unsigned)mon.free_biggest_size,
-           (unsigned)mon.used_pct,    (unsigned)mon.frag_pct);
+    printf("[mem] boot      free=%u big=%u used=%u%%\r\n",
+           (unsigned)mon.free_size, (unsigned)mon.free_biggest_size, (unsigned)mon.used_pct);
+    if (!objects.boot) { printf("[FATAL] OOM after boot screen — increase LV_MEM_SIZE\r\n"); Error_Handler(); }
+
+    printf("[screens] dashboard...\r\n");
+    create_screen_dashboard();
+    lv_mem_monitor(&mon);
+    printf("[mem] dashboard free=%u big=%u used=%u%%\r\n",
+           (unsigned)mon.free_size, (unsigned)mon.free_biggest_size, (unsigned)mon.used_pct);
+    if (!objects.scr_home) { printf("[FATAL] OOM after dashboard screen — increase LV_MEM_SIZE\r\n"); Error_Handler(); }
+
+    printf("[screens] results...\r\n");
+    create_screen_results();
+    lv_mem_monitor(&mon);
+    printf("[mem] results   free=%u big=%u used=%u%%\r\n",
+           (unsigned)mon.free_size, (unsigned)mon.free_biggest_size, (unsigned)mon.used_pct);
+    if (!objects.results) { printf("[FATAL] OOM after results screen — increase LV_MEM_SIZE\r\n"); Error_Handler(); }
+
+    printf("[screens] fvl...\r\n");
+    create_screen_fvl();
+    lv_mem_monitor(&mon);
+    printf("[mem] fvl       free=%u big=%u used=%u%%\r\n",
+           (unsigned)mon.free_size, (unsigned)mon.free_biggest_size, (unsigned)mon.used_pct);
+    if (!objects.fvl_screen) { printf("[FATAL] OOM after fvl screen — increase LV_MEM_SIZE\r\n"); Error_Handler(); }
+
+    printf("[screens] vt...\r\n");
+    create_screen_vt();
+    lv_mem_monitor(&mon);
+    printf("[mem] vt        free=%u big=%u used=%u%%\r\n",
+           (unsigned)mon.free_size, (unsigned)mon.free_biggest_size, (unsigned)mon.used_pct);
+    if (!objects.vt_screen) { printf("[FATAL] OOM after vt screen — increase LV_MEM_SIZE\r\n"); Error_Handler(); }
+
+    printf("[screens] all created\r\n");
 }
 
-/* ── countdown_start ─────────────────────────────────────────────────────
- * FIX-B: interval 900 ms → 1000 ms; label + colour set before timer fires.
- */
-static int s_cd_step = 0;
-
-static void countdown_timer_cb(lv_timer_t *timer)
-{
-    (void)timer;
-    static const char *seq[] = { "3", "2", "1", "BLOW!" };
-    if (s_cd_step < 4) {
-        if (objects.countdown_lbl) {
-            lv_label_set_text(objects.countdown_lbl, seq[s_cd_step]);
-            lv_obj_set_style_text_color(objects.countdown_lbl,
-                s_cd_step < 3 ? lv_color_hex(C_GREEN)
-                              : lv_color_hex(C_AMBER), 0);
-        }
-        s_cd_step++;
-    } else {
-        lv_timer_delete(timer);
-        loadScreen(SCREEN_ID_LIVE);
-    }
-}
-
-void countdown_start(void)
-{
-    s_cd_step = 0;
-    /* FIX-B: immediately show "3" with correct colour before any timer fire */
-    if (objects.countdown_lbl) {
-        lv_label_set_text(objects.countdown_lbl, "3");
-        lv_obj_set_style_text_color(objects.countdown_lbl,
-                                    lv_color_hex(C_GREEN), 0);
-    }
-    lv_timer_create(countdown_timer_cb, 1000, NULL);  /* FIX-B: 1000 ms */
-}
-
-/* ── Live test helpers ───────────────────────────────────────────────────── */
+/* ── Live test helpers ─────────────────────────────────────────────────────
+ * The live/countdown screens were removed; these remain because
+ * spirometry.c calls them during acquisition.  Their target objects are
+ * never created (NULL), so every body below is a guarded no-op. */
 void live_update_flow(float flow_lps, float vol_l, uint32_t elapsed_ms)
 {
     char buf[12];

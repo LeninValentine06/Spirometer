@@ -12,9 +12,10 @@
 void action_start_test(lv_event_t *e)
 {
     (void)e;
-    spiro_reset();              /* clear any prior result / live trace */
-    loadScreen(SCREEN_ID_COUNTDOWN);
-    countdown_start();
+    /* Trimmed UI: no countdown or live screen.  Clear the previous result
+     * and arm the engine; the user blows from the dashboard and the results
+     * screen is shown automatically when the maneuver completes. */
+    spiro_reset();
 }
 
 void action_go_to_dashboard(lv_event_t *e)

@@ -95,9 +95,19 @@ int main(void)
   }
 
   /* ── Step 3: Calibration ─────────────────────────────────────────────── */
+  /* Set ENABLE_TOUCH_CAL to 0 during bring-up to skip the 4-tap calibration.
+   * The XPT2046 driver then uses its built-in default mapping — touch will be
+   * approximate but fully functional for exercising the UI. */
+#ifndef ENABLE_TOUCH_CAL
+#define ENABLE_TOUCH_CAL 0
+#endif
+#if ENABLE_TOUCH_CAL
   LOG("touch_cal_run — waiting for 4 corner taps...");
   touch_cal_run();
   LOG("calibration done");
+#else
+  LOG("touch calibration SKIPPED (ENABLE_TOUCH_CAL=0, using default cal)");
+#endif
 
   /* ── Step 4: Register LVGL indev ────────────────────────────────────── */
   LOG("registering touch indev...");

@@ -11,19 +11,17 @@ extern "C" {
 /* ── Screen IDs ─────────────────────────────────────────────────────────── */
 enum ScreensEnum {
     _SCREEN_ID_FIRST      = 1,
-    SCREEN_ID_BOOT        = 1,   /* Boot / self-test                         */
+    SCREEN_ID_BOOT        = 1,   /* Boot splash                              */
     SCREEN_ID_DASHBOARD   = 2,   /* Main dashboard (Ready + recent result)   */
-    SCREEN_ID_COUNTDOWN   = 3,   /* 3-2-1-BLOW!                              */
-    SCREEN_ID_LIVE        = 4,   /* Live test acquisition                    */
-    SCREEN_ID_RESULTS     = 5,   /* Results summary (carousel page 1)        */
-    SCREEN_ID_FVL         = 6,   /* Flow-Volume loop (carousel page 2)       */
-    SCREEN_ID_VT          = 7,   /* Volume-Time graph (carousel page 3)      */
-    /* Legacy names kept so spirometry.c / actions.c still compile */
+    SCREEN_ID_RESULTS     = 3,   /* Results summary (carousel page 1)        */
+    SCREEN_ID_FVL         = 4,   /* Flow-Volume loop (carousel page 2)       */
+    SCREEN_ID_VT          = 5,   /* Volume-Time graph (carousel page 3)      */
+    /* Legacy aliases kept so spirometry.c / actions.c still compile */
     SCREEN_ID_SCR_HOME    = 2,
-    SCREEN_ID_HISTORY     = 7,
+    SCREEN_ID_HISTORY     = 5,
     SCREEN_ID_PATIENT     = 2,   /* redirects to dashboard for now           */
     SCREEN_ID_SETTINGS    = 2,
-    _SCREEN_ID_LAST       = 7
+    _SCREEN_ID_LAST       = 5
 };
 
 /* ── Master object table ─────────────────────────────────────────────────── */
@@ -127,8 +125,6 @@ extern objects_t objects;
 void create_screens(void);
 void create_screen_boot(void);
 void create_screen_dashboard(void);
-void create_screen_countdown(void);
-void create_screen_live(void);
 void create_screen_results(void);
 void create_screen_fvl(void);
 void create_screen_vt(void);
@@ -143,8 +139,6 @@ void tick_screen(int screen_index);
 void tick_screen_by_id(enum ScreensEnum screenId);
 void tick_screen_boot(void);
 void tick_screen_dashboard(void);
-void tick_screen_countdown(void);
-void tick_screen_live(void);
 void tick_screen_results(void);
 void tick_screen_fvl(void);
 void tick_screen_vt(void);
@@ -152,10 +146,9 @@ void tick_screen_vt(void);
 extern ext_font_desc_t fonts[];
 extern uint32_t active_theme_index;
 
-/* Countdown control — called from actions.c */
-void countdown_start(void);
-
-/* Live test helpers — called from spirometry.c */
+/* Live test helpers — still called by spirometry.c during acquisition.
+ * The live screen has been removed, so the underlying objects are never
+ * created and these resolve to safe no-ops (every body is null-guarded). */
 void live_update_flow(float flow_lps, float vol_l, uint32_t elapsed_ms);
 void live_set_coaching(const char *msg);
 void live_push_sample(float flow_lps);  /* appends one point to live chart */

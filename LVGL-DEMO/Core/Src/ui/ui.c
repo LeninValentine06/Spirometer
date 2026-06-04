@@ -24,15 +24,13 @@ static lv_obj_t *getLvglObjectFromIndex(int32_t index)
 {
     if (index < 0) return NULL;
     lv_obj_t *screen_ptrs[] = {
-        objects.boot,
-        objects.scr_home,
-        objects.countdown,
-        objects.live,
-        objects.results,
-        objects.fvl_screen,
-        objects.vt_screen,
+        objects.boot,        /* 0 → SCREEN_ID_BOOT      */
+        objects.scr_home,    /* 1 → SCREEN_ID_DASHBOARD */
+        objects.results,     /* 2 → SCREEN_ID_RESULTS   */
+        objects.fvl_screen,  /* 3 → SCREEN_ID_FVL       */
+        objects.vt_screen,   /* 4 → SCREEN_ID_VT        */
     };
-    if (index < 7) return screen_ptrs[index];
+    if (index < 5) return screen_ptrs[index];
     return NULL;
 }
 
