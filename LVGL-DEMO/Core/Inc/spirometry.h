@@ -52,10 +52,12 @@ extern "C" {
  * RAM BUDGET (STM32F401CC = 64 KB total)
  *   200 Hz is 25x the sensor 8 ms response time - no accuracy loss.
  *   ATS standard max maneuver = 6 s; hard stop at 8 s.
- *   BUF_MAX = 200 * 6 + 32 = 1232 samples
- *   s_raw[]  uint16_t * 1232 = 2.4 KB  (raw ADC; flow reconstructed on use)
- *   s_vol[]  float    * 1232 = 4.8 KB  (integrated volume for computation)
- *   Total ~7.2 KB, leaving ~15 KB headroom beside LVGL 32 KB heap.
+ *   BUF_MAX = 200 * 8 + 50 = 1650 samples  (8 s hard stop, see below)
+ *   s_raw[]  uint16_t * 1650 = 3.3 KB  (raw ADC; flow reconstructed on use)
+ *   s_vol[]  uint16_t * 1650 = 3.3 KB  (integrated volume, stored in mL)
+ *   Total ~6.6 KB.  Storing volume as uint16_t mL (rather than float) halves
+ *   the volume array from 6.6 KB to 3.3 KB with no clinically relevant loss
+ *   (1 mL resolution vs the 0.01 L = 10 mL ISO display step).
  */
 #define SPIRO_ADC_FS_HZ        200u      /* samples/s -- 25x sensor response time */
 #define SPIRO_ADC_MAX          4095u     /* 12-bit ADC full scale                 */
@@ -124,8 +126,12 @@ typedef struct {
 
     /* Raw sample and integrated volume arrays for graphing
        (pointers into internal static buffers — valid until next blow) */
-    const uint16_t *raw_buf;    /* raw ADC counts, length = n_samples */
-    const float    *vol_buf;    /* integrated volume L, length = n_samples */
+    const uint16_t *raw_buf;    /* raw ADC counts, length = n_samples       */
+    const uint16_t *vol_buf;    /* integrated volume in MILLILITRES (mL),
+                                   length = n_samples. Divide by 1000 for L.
+                                   Stored as uint16_t (not float) to halve RAM;
+                                   1 mL resolution exceeds the 0.01 L display
+                                   step required by ISO 26782 §5.1.            */
 } spiro_result_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

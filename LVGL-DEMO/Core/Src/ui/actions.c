@@ -5,12 +5,14 @@
 #include "actions.h"
 #include "ui.h"
 #include "screens.h"
+#include "spirometry.h"   /* spiro_reset() on a fresh test */
 
 /* ── Dashboard ──────────────────────────────────────────────────────────── */
 
 void action_start_test(lv_event_t *e)
 {
     (void)e;
+    spiro_reset();              /* clear any prior result / live trace */
     loadScreen(SCREEN_ID_COUNTDOWN);
     countdown_start();
 }

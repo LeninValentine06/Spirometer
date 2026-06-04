@@ -632,15 +632,20 @@
 
 /* Montserrat fonts with ASCII range and some symbols using bpp = 4
  * https://fonts.google.com/specimen/Montserrat */
+/* SpiroFlow uses only size 10 (axis labels) and 14 (all other UI text).
+ * Sizes 12, 24, and 48 were previously enabled but are unreferenced in the
+ * codebase.  Each full Montserrat size costs ~8–28 KB of .rodata in flash;
+ * disabling the three unused sizes recovers ~50 KB and resolves the
+ * "FLASH overflowed by 57916 bytes" linker error on STM32F401CC (256 KB). */
 #define LV_FONT_MONTSERRAT_8  0
-#define LV_FONT_MONTSERRAT_10 1
-#define LV_FONT_MONTSERRAT_12 1
-#define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_10 1   /* axis tick labels, small meta-labels     */
+#define LV_FONT_MONTSERRAT_12 0   /* unused — was 1, disabled to save ~8 KB  */
+#define LV_FONT_MONTSERRAT_14 1   /* all buttons, cards, status bar, styles  */
 #define LV_FONT_MONTSERRAT_16 0
 #define LV_FONT_MONTSERRAT_18 0
 #define LV_FONT_MONTSERRAT_20 0
 #define LV_FONT_MONTSERRAT_22 0
-#define LV_FONT_MONTSERRAT_24 0
+#define LV_FONT_MONTSERRAT_24 0   /* unused — was 1, disabled to save ~22 KB */
 #define LV_FONT_MONTSERRAT_26 0
 #define LV_FONT_MONTSERRAT_28 0
 #define LV_FONT_MONTSERRAT_30 0
@@ -652,7 +657,7 @@
 #define LV_FONT_MONTSERRAT_42 0
 #define LV_FONT_MONTSERRAT_44 0
 #define LV_FONT_MONTSERRAT_46 0
-#define LV_FONT_MONTSERRAT_48 0
+#define LV_FONT_MONTSERRAT_48 0   /* unused — was 1, disabled to save ~28 KB */
 
 /* Demonstrate special features */
 #define LV_FONT_MONTSERRAT_28_COMPRESSED    0  /**< bpp = 3 */

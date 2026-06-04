@@ -104,22 +104,31 @@ static uint16_t xpt2046_median5(uint8_t cmd)
 
 /* ── Raw read exposed to calibration routine ────────────────────────────── */
 /*
- * Returns false if the IRQ line is high (no touch).
- * The IRQ is re-checked AFTER sampling — discards stale reads where the
- * finger lifted while the 5-sample burst was in progress.
+ * Returns false when the panel is NOT being touched, true (with raw_x/raw_y
+ * filled) when it is.
+ *
+ * Touch is gated on the XPT2046 PENIRQ (T_IRQ) line:
+ *   - idle  → pulled high by the GPIO pull-up (gpio.c sets PA3 = PULLUP)  → false
+ *   - press → the panel pulls T_IRQ low                                   → true
+ *
+ * This gate is REQUIRED: touch_cal.c's averaging loop runs
+ * `while (xpt2046_read_raw_point(...))` and the LVGL indev reports release
+ * from this return value.  If this always returned true (as a previous
+ * version did with the IRQ check commented out), the calibration averaging
+ * loop never terminates and the UI locks on the first calibration target.
+ *
+ * Only the PRE-check is used.  A post-sample re-check is intentionally
+ * avoided: the XPT2046 holds PENIRQ low/disabled during a position
+ * conversion and only re-enables it at end-of-conversion, so reading the
+ * line immediately after the burst can give a false "released" result.
  */
 bool xpt2046_read_raw_point(uint16_t *raw_x, uint16_t *raw_y)
 {
-    // Remove the pre-check — T_IRQ is not connected
-    // if (HAL_GPIO_ReadPin(TOUCH_IRQ_PORT, TOUCH_IRQ_PIN) == GPIO_PIN_SET)
-    //     return false;
+    if (HAL_GPIO_ReadPin(TOUCH_IRQ_PORT, TOUCH_IRQ_PIN) == GPIO_PIN_SET)
+        return false;   /* T_IRQ high → no touch */
 
     *raw_y = xpt2046_median5(0xD0);
     *raw_x = xpt2046_median5(0x90);
-
-    // Remove the post-check too — same reason
-    // if (HAL_GPIO_ReadPin(TOUCH_IRQ_PORT, TOUCH_IRQ_PIN) == GPIO_PIN_SET)
-    //     return false;
 
     return true;
 }
@@ -128,7 +137,9 @@ bool xpt2046_read_raw_point(uint16_t *raw_x, uint16_t *raw_y)
 bool xpt2046_get_touch(int16_t *x, int16_t *y)
 {
     uint16_t raw_x, raw_y;
-    xpt2046_read_raw_point(&raw_x, &raw_y);
+    /* Respect the PENIRQ gate: no touch → report released */
+    if (!xpt2046_read_raw_point(&raw_x, &raw_y))
+        return false;
 
     // XPT2046 returns ~0 or ~4095 when not touched (no pressure)
     // Valid touch range is roughly 200–3800

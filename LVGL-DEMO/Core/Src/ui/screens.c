@@ -329,7 +329,7 @@ void create_screen_boot(void)
     lv_obj_set_size(logo, 240, LV_SIZE_CONTENT);
     lv_obj_set_style_text_align(logo, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(logo, lv_color_hex(C_GREEN), 0);
-    lv_obj_set_style_text_font(logo, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(logo, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_opa(logo, 0, 0);
     lv_label_set_text(logo, "SPIROFLOW");
 
@@ -474,7 +474,7 @@ void create_screen_dashboard(void)
         lv_obj_set_size(rl, 216, LV_SIZE_CONTENT);
         lv_obj_set_style_text_align(rl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(rl, lv_color_hex(C_GREEN), 0);
-        lv_obj_set_style_text_font(rl, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_font(rl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_opa(rl, 0, 0);
         lv_label_set_text(rl, "READY");
 
@@ -505,7 +505,7 @@ void create_screen_dashboard(void)
         lv_obj_t *bl = lv_label_create(btn);
         lv_obj_set_align(bl, LV_ALIGN_CENTER);
         lv_obj_set_style_text_color(bl, lv_color_hex(0x0A1A0A), 0);
-        lv_obj_set_style_text_font(bl, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_opa(bl, 0, 0);
         lv_label_set_text(bl, LV_SYMBOL_PLAY "  START TEST");
     }
@@ -554,7 +554,7 @@ void create_screen_countdown(void)
     lv_obj_set_size(cl, 240, LV_SIZE_CONTENT);
     lv_obj_set_style_text_align(cl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(cl, lv_color_hex(C_GREEN), 0);
-    lv_obj_set_style_text_font(cl, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(cl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_opa(cl, 0, 0);
     lv_label_set_text(cl, "3");
 
@@ -594,7 +594,7 @@ void create_screen_live(void)
     lv_obj_set_pos(fl, 12, 46);
     lv_obj_set_size(fl, 110, LV_SIZE_CONTENT);
     lv_obj_set_style_text_color(fl, lv_color_hex(C_GREEN), 0);
-    lv_obj_set_style_text_font(fl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(fl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_opa(fl, 0, 0);
     lv_label_set_text(fl, "0.00");
     make_label(s, 12, 74, C_DIM, &lv_font_montserrat_10, "L/s");
@@ -605,7 +605,7 @@ void create_screen_live(void)
     lv_obj_set_pos(vl, 128, 46);
     lv_obj_set_size(vl, 100, LV_SIZE_CONTENT);
     lv_obj_set_style_text_color(vl, lv_color_hex(C_CYAN), 0);
-    lv_obj_set_style_text_font(vl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(vl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_opa(vl, 0, 0);
     lv_label_set_text(vl, "0.00");
     make_label(s, 128, 74, C_DIM, &lv_font_montserrat_10, "L");
@@ -631,7 +631,7 @@ void create_screen_live(void)
     lv_obj_set_size(coaching, 240, LV_SIZE_CONTENT);
     lv_obj_set_style_text_align(coaching, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(coaching, lv_color_hex(C_AMBER), 0);
-    lv_obj_set_style_text_font(coaching, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_font(coaching, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_opa(coaching, 0, 0);
     lv_label_set_text(coaching, "BLOW HARD!");
 
@@ -740,7 +740,7 @@ void create_screen_results(void)
         lv_obj_set_size(gl, 30, LV_SIZE_CONTENT);
         lv_obj_set_style_text_align(gl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(gl, lv_color_hex(C_GREEN), 0);
-        lv_obj_set_style_text_font(gl, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_font(gl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_bg_opa(gl, 0, 0);
         lv_label_set_text(gl, "-");
 
@@ -911,9 +911,11 @@ void create_screen_results(void)
         lv_label_set_text(l, "--");
     }
 
-    /* Footer + page dots */
-    make_swipe_footer(s, NULL, "Flow-Vol \xE2\x86\x92",
-                      NULL, action_go_to_fvl);
+    /* Footer + page dots.
+     * Left slot = Home (back to dashboard) so the results carousel is not a
+     * dead-end; right slot advances to the Flow-Volume page. */
+    make_swipe_footer(s, LV_SYMBOL_HOME " Home", "Flow-Vol \xE2\x86\x92",
+                      action_go_to_dashboard, action_go_to_fvl);
     make_page_dots(s, 0, &objects.res_page_lbl);
 
     /* FIX-I: swipe gesture */
@@ -1065,13 +1067,25 @@ void create_screens(void)
 
     s_boot_done = false;  /* FIX-A: reset on every full UI rebuild */
 
-    create_screen_boot();
-    create_screen_dashboard();
-    create_screen_countdown();
-    create_screen_live();
-    create_screen_results();
-    create_screen_fvl();
-    create_screen_vt();
+    /* Per-screen trace: the LAST line printed before a hang identifies the
+     * screen whose creation failed (most likely LVGL heap exhaustion). */
+    printf("[screens] boot...\r\n");      create_screen_boot();
+    printf("[screens] dashboard...\r\n"); create_screen_dashboard();
+    printf("[screens] countdown...\r\n"); create_screen_countdown();
+    printf("[screens] live...\r\n");      create_screen_live();
+    printf("[screens] results...\r\n");   create_screen_results();
+    printf("[screens] fvl...\r\n");       create_screen_fvl();
+    printf("[screens] vt...\r\n");        create_screen_vt();
+    printf("[screens] all created\r\n");
+
+    /* LVGL heap headroom — if used%% is near 100 or free_biggest is tiny,
+     * the build is RAM-bound and screens must be created lazily. */
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    printf("[mem] total=%u free=%u biggest=%u used=%u%% frag=%u%%\r\n",
+           (unsigned)mon.total_size,  (unsigned)mon.free_size,
+           (unsigned)mon.free_biggest_size,
+           (unsigned)mon.used_pct,    (unsigned)mon.frag_pct);
 }
 
 /* ── countdown_start ─────────────────────────────────────────────────────

@@ -15,6 +15,7 @@
 #include "vars.h"
 
 #include <string.h>
+#include <stdio.h>   /* diagnostic traces */
 
 static int16_t currentScreen  = -1;
 static int16_t previousScreen = -1;   /* FIX-C */
@@ -41,14 +42,22 @@ void loadScreen(enum ScreensEnum screenId)
     int16_t nextScreen = (int16_t)(screenId - 1);
     lv_obj_t *screen   = getLvglObjectFromIndex(nextScreen);
 
-    lv_scr_load_anim_t anim = LV_SCR_LOAD_ANIM_MOVE_LEFT;   /* default: forward */
-    if (previousScreen >= 0 && nextScreen < currentScreen) {
-        /* Moving to a lower-indexed screen = backward = slide right */
-        anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
-    }
-
     if (screen) {
-        lv_scr_load_anim(screen, anim, 200, 0, false);
+        if (currentScreen < 0) {
+            /* First screen load after boot.  The previously-active screen is
+             * the calibration screen, which touch_cal_run() has already
+             * deleted.  lv_scr_load_anim() would animate a 200 ms transition
+             * FROM that now-freed object (use-after-free → hard fault), so
+             * load directly with no transition for the very first screen. */
+            lv_scr_load(screen);
+        } else {
+            lv_scr_load_anim_t anim = LV_SCR_LOAD_ANIM_MOVE_LEFT; /* forward */
+            if (previousScreen >= 0 && nextScreen < currentScreen) {
+                /* Moving to a lower-indexed screen = backward = slide right */
+                anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+            }
+            lv_scr_load_anim(screen, anim, 200, 0, false);
+        }
     }
 
     previousScreen = currentScreen;
@@ -57,8 +66,11 @@ void loadScreen(enum ScreensEnum screenId)
 
 void ui_init(void)
 {
+    printf("[ui] create_screens...\r\n");
     create_screens();
+    printf("[ui] create_screens done; loadScreen(BOOT)...\r\n");
     loadScreen(SCREEN_ID_BOOT);
+    printf("[ui] loadScreen(BOOT) done\r\n");
 }
 
 void ui_tick(void)

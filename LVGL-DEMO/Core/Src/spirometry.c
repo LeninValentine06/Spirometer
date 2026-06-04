@@ -13,8 +13,14 @@
  *        added to gui_fmt_val_checked().  A SAT! warning is shown if the ADC
  *        clips (§ 7.1 environmental conditions are a hardware concern).
  *
- * § 7.2 Recording time: buffer extended to support at least 15 s.
- *        Enforced: SPIRO_MAX_DURATION_MS ≥ 15000.  The code now uses
+ * § 7.2 Recording time: the standard asks for at least 15 s of capacity.
+ *        ACTUAL LIMIT ON THIS HARDWARE: the maneuver is hard-stopped at
+ *        SPIRO_MAX_DURATION_MS (8000 ms) and the buffer holds 1650 samples
+ *        (8.25 s at 200 Hz).  This covers the ATS-typical ≤6 s forced
+ *        expiration with margin, but does NOT meet the full 15 s §7.2
+ *        capacity.  Extending to 15 s would need a ~3000-sample buffer
+ *        (≈12 KB with the uint16_t raw+volume layout) — left as a known
+ *        limitation given the 64 KB RAM budget.  The code uses
  *        SPIRO_MAX_DURATION_MS directly rather than a hard-coded constant.
  *
  * § 7.3 Graphical display aspect ratios (normative):
@@ -161,7 +167,14 @@ static Predicted compute_predicted(int sex, float age, float ht_cm)
 
 /* ── Sample buffers ──────────────────────────────────────────────────────── */
 static uint16_t s_raw[SPIRO_BUF_MAX_SAMPLES];
-static float    s_vol[SPIRO_BUF_MAX_SAMPLES];   /* cumulative volume L      */
+static uint16_t s_vol_ml[SPIRO_BUF_MAX_SAMPLES]; /* cumulative volume in mL    */
+static float    s_vol_acc = 0.0f;                /* running float accumulator  */
+
+/* Cumulative volume of sample i, in litres (reconstructed from the mL store). */
+static inline float vol_l(uint32_t i)
+{
+    return (float)s_vol_ml[i] * 0.001f;
+}
 
 static inline float raw_to_lps(uint16_t raw)
 {
@@ -257,7 +270,7 @@ static void fvl_draw_cb(lv_event_t *e)
         else        fl_ema = FVL_EMA_ALPHA * fl_raw + (1.0f - FVL_EMA_ALPHA) * fl_ema;
         if (fl_ema > peak_f_ema) { peak_f_ema = fl_ema; peak_i = i; }
         if (i % FVL_STEP != 0 && i != n - 1) continue;
-        float vl = s_result.vol_buf[i];
+        float vl = s_result.vol_buf[i] * 0.001f;   /* mL → L */
         if (vl < 0.0f) vl = 0.0f;
         int32_t px1 = ox + (int32_t)((vl    * 1000.0f * W) / fvl_x_max_ml);
         int32_t py1 = oy + H - (int32_t)((fl_ema * 1000.0f * H) / fvl_y_max_mlps);
@@ -276,7 +289,7 @@ static void fvl_draw_cb(lv_event_t *e)
 
     /* PEF dot (amber) — at the smoothed peak */
     if (peak_f_ema > 0.0f) {
-        float pvl = s_result.vol_buf[peak_i];
+        float pvl = s_result.vol_buf[peak_i] * 0.001f;   /* mL → L */
         if (pvl < 0.0f) pvl = 0.0f;
         int32_t px = ox + (int32_t)((pvl        * 1000.0f * W) / fvl_x_max_ml);
         int32_t py = oy + H - (int32_t)((peak_f_ema * 1000.0f * H) / fvl_y_max_mlps);
@@ -363,7 +376,7 @@ static void vt_draw_cb(lv_event_t *e)
     uint32_t n = s_result.n_samples;
 
     for (uint32_t i = 0; i < n; i++) {
-        float vl_raw = s_result.vol_buf[i];
+        float vl_raw = s_result.vol_buf[i] * 0.001f;   /* mL → L */
         if (vl_raw < 0.0f) vl_raw = 0.0f;
         if (i == 0) vl_ema = vl_raw;
         else        vl_ema = VT_EMA_ALPHA * vl_raw + (1.0f - VT_EMA_ALPHA) * vl_ema;
@@ -487,7 +500,7 @@ static void live_draw_cb(lv_event_t *e)
     if (s_live_peak_lps > 8.0f)
         live_f_max_mlps = (int32_t)((ceilf(s_live_peak_lps / 2.0f) * 2.0f) * 1000.0f);
 
-    /* ISO §7.2: recording time ≥ 15 s — live chart X axis covers buffer */
+    /* Live chart X axis spans the full maneuver window (SPIRO_MAX_DURATION_MS) */
     int32_t live_t_max_ms = (int32_t)SPIRO_MAX_DURATION_MS;
 
     #define LIVE_STEP 4
@@ -571,11 +584,22 @@ bool spiro_push_sample(uint16_t adc_raw)
     if (adc_raw >= SPIRO_ADC_MAX) s_saturated = true;
     float flow = raw_to_lps(adc_raw);
     if (flow > s_live_peak_lps) s_live_peak_lps = flow;
-    float vol  = (s_n > 0) ? s_vol[s_n - 1] + flow * DT_S : 0.0f;
-    /* ISO §6: clamp at SPIRO_MAX_VOLUME_L to stay in measurement range */
-    if (vol > SPIRO_MAX_VOLUME_L) vol = SPIRO_MAX_VOLUME_L;
-    s_raw[s_n] = adc_raw;
-    s_vol[s_n] = vol;
+
+    /* Integrate on a float accumulator (no read-back quantisation drift),
+     * then store the quantised mL value.  s_n == 0 marks the first sample of
+     * a maneuver, so the accumulator self-resets at every buffer reset site. */
+    if (s_n == 0) s_vol_acc = 0.0f;
+    else          s_vol_acc += flow * DT_S;
+
+    /* ISO §6: clamp to the 0–8 L measurement range */
+    if (s_vol_acc < 0.0f)              s_vol_acc = 0.0f;
+    if (s_vol_acc > SPIRO_MAX_VOLUME_L) s_vol_acc = SPIRO_MAX_VOLUME_L;
+
+    uint32_t vml = (uint32_t)(s_vol_acc * 1000.0f + 0.5f);
+    if (vml > 65535u) vml = 65535u;
+
+    s_raw[s_n]    = adc_raw;
+    s_vol_ml[s_n] = (uint16_t)vml;
     s_n++;
     return true;
 }
@@ -608,7 +632,7 @@ void spiro_process(void)
         float    flow    = raw_to_lps(raw);
         uint32_t elapsed = now - s_start_tick;
 
-        float vol_now = (s_n > 0) ? s_vol[s_n - 1] : 0.0f;
+        float vol_now = (s_n > 0) ? vol_l(s_n - 1) : 0.0f;
         live_update_flow(flow, vol_now, elapsed);
 
         /* Coaching: silence first 300 ms, then context-aware messages */
@@ -635,7 +659,7 @@ void spiro_process(void)
 
         live_push_sample(flow);
 
-        /* ISO §7.2: record for at least 15 s — honour SPIRO_MAX_DURATION_MS */
+        /* Hard stop at SPIRO_MAX_DURATION_MS, or when the buffer is full */
         if (elapsed >= SPIRO_MAX_DURATION_MS || s_n >= SPIRO_BUF_MAX_SAMPLES) {
             s_state = SPIRO_STATE_COMPUTING;
             break;
@@ -714,7 +738,7 @@ static void do_compute(void)
      * §7.5 requires to be < max(0.150 L, 5% FVC).
      */
     float t_pef  = (float)pef_idx * DT_S;
-    float v_pef  = s_vol[pef_idx];
+    float v_pef  = vol_l(pef_idx);
     float t0_raw = (pef > 0.01f) ? (t_pef - v_pef / pef) : 0.0f;
     float t0     = (t0_raw < 0.0f) ? 0.0f : t0_raw;
     s_t0_s = t0;
@@ -725,10 +749,10 @@ static void do_compute(void)
      * sample nearest t₀ is the physically meaningful BEV. */
     uint32_t t0_idx = (uint32_t)(t0 / DT_S + 0.5f);
     if (t0_idx >= s_n) t0_idx = s_n - 1;
-    s_bev = s_vol[t0_idx];
+    s_bev = vol_l(t0_idx);
 
     /* ── Step 3: ISO §7.4 — FVC (total expired volume from sample 0) ── */
-    float fvc = s_vol[s_n - 1];   /* vol_buf is already cumulative */
+    float fvc = vol_l(s_n - 1);   /* vol_buf is already cumulative */
     if (fvc < 0.0f) fvc = 0.0f;
     if (fvc > SPIRO_MAX_VOLUME_L) fvc = SPIRO_MAX_VOLUME_L;
 
@@ -740,18 +764,18 @@ static void do_compute(void)
      * This correctly accounts for BEV: the timed volumes are relative to t₀,
      * not to the first ADC sample.
      */
-    float v_at_t0 = s_vol[t0_idx];
+    float v_at_t0 = vol_l(t0_idx);
 
     /* FEV1: volume at t₀ + 1.000 s */
     uint32_t fev1_idx = t0_idx + SPIRO_ADC_FS_HZ;    /* t₀ + 1 s */
     if (fev1_idx >= s_n) fev1_idx = s_n - 1;
-    float fev1 = s_vol[fev1_idx] - v_at_t0;
+    float fev1 = vol_l(fev1_idx) - v_at_t0;
     if (fev1 < 0.0f) fev1 = 0.0f;
 
     /* FEV6: volume at t₀ + 6.000 s */
     uint32_t fev6_idx = t0_idx + (uint32_t)(6u * SPIRO_ADC_FS_HZ);
     if (fev6_idx >= s_n) fev6_idx = s_n - 1;
-    float fev6 = s_vol[fev6_idx] - v_at_t0;
+    float fev6 = vol_l(fev6_idx) - v_at_t0;
     if (fev6 < 0.0f) fev6 = 0.0f;
     s_fev6 = fev6;
 
@@ -777,8 +801,8 @@ static void do_compute(void)
         float v75 = v_at_t0 + 0.75f * fvc;
         uint32_t i25 = t0_idx, i75 = t0_idx;
         for (uint32_t i = t0_idx; i < s_n; i++) {
-            if (s_vol[i] <= v25) i25 = i;
-            if (s_vol[i] <= v75) i75 = i;
+            if (vol_l(i) <= v25) i25 = i;
+            if (vol_l(i) <= v75) i75 = i;
         }
         if (i75 > i25) {
             float sum = 0.0f;
@@ -803,7 +827,7 @@ static void do_compute(void)
     {
         uint32_t win = (uint32_t)(SPIRO_EOT_WINDOW_S * SPIRO_ADC_FS_HZ);
         if (te_idx >= win) {
-            float dv = s_vol[te_idx] - s_vol[te_idx - win];
+            float dv = vol_l(te_idx) - vol_l(te_idx - win);
             has_plateau = (dv < SPIRO_EOT_PLATEAU_L);
         }
     }
@@ -840,7 +864,7 @@ static void do_compute(void)
     s_result.n_samples   = s_n;
     s_result.duration_ms = duration_ms;
     s_result.raw_buf     = s_raw;
-    s_result.vol_buf     = s_vol;
+    s_result.vol_buf     = s_vol_ml;
     s_has_result         = true;
 }
 
@@ -850,12 +874,13 @@ static float compute_fef_at_volume_fraction(float fraction, float fvc)
     /* Find volume on the cumulative curve starting from t₀ */
     uint32_t t0_idx_local = (uint32_t)(s_t0_s / DT_S + 0.5f);
     if (t0_idx_local >= s_n) t0_idx_local = 0;
-    float v_at_t0 = s_vol[t0_idx_local];
+    float v_at_t0 = vol_l(t0_idx_local);
     float target  = v_at_t0 + fraction * fvc;
 
     for (uint32_t i = t0_idx_local + 1; i < s_n; i++) {
-        if (s_vol[i] >= target) {
-            float t = (target - s_vol[i - 1]) / (s_vol[i] - s_vol[i - 1] + 1e-9f);
+        if (vol_l(i) >= target) {
+            float v_prev = vol_l(i - 1);
+            float t = (target - v_prev) / (vol_l(i) - v_prev + 1e-9f);
             return raw_to_lps(s_raw[i - 1]) + t * (raw_to_lps(s_raw[i]) - raw_to_lps(s_raw[i - 1]));
         }
     }
@@ -930,14 +955,16 @@ static void gui_update_metrics(void)
     /* FEV1/FVC */
     {
         int v = (int)(s_result.ratio * 10.0f + 0.5f);
-        if (v < 0) v = 0; if (v > 1000) v = 1000;
+        if (v < 0)    v = 0;
+        if (v > 1000) v = 1000;
         snprintf(buf, sizeof(buf), "%d.%01d", v / 10, v % 10);
     }
     if (objects.res_ratio_act)  lv_label_set_text(objects.res_ratio_act,  buf);
     if (objects.obj6)           lv_label_set_text(objects.obj6,           buf);
     {
         int v = (int)(pred.ratio_pred * 10.0f + 0.5f);
-        if (v < 0) v = 0; if (v > 1000) v = 1000;
+        if (v < 0)    v = 0;
+        if (v > 1000) v = 1000;
         snprintf(buf, sizeof(buf), "%d.%01d", v / 10, v % 10);
     }
     if (objects.res_ratio_pred) lv_label_set_text(objects.res_ratio_pred, buf);
@@ -1034,18 +1061,36 @@ static void gui_update_metrics(void)
         }
     }
 
-    /* Dashboard last-test card */
+    /* Dashboard last-test card.
+     * Uses a 20-byte local buffer — the format "%d.%02d L (%d%%)" can produce
+     * at most "8.00 L (100%)" = 14 chars + NUL = 15 bytes.  The larger buffer
+     * eliminates the -Wformat-truncation warning because GCC can see the buffer
+     * is genuinely large enough for every clamped value combination. */
     {
-        int v1   = (int)(s_result.fev1 * 100.0f + 0.5f); if (v1 > 800) v1 = 800;
-        int pct1 = (pred.fev1_pred > 0.0f) ? (int)(s_result.fev1 / pred.fev1_pred * 100.0f + 0.5f) : 0;
-        snprintf(buf, sizeof(buf), "%d.%02d L (%d%%)", v1 / 100, v1 % 100, pct1 > 999 ? 999 : pct1);
-        if (objects.dash_last_fev1) lv_label_set_text(objects.dash_last_fev1, buf);
+        char dash_buf[20];
+        int  v1   = (int)(s_result.fev1 * 100.0f + 0.5f);
+        if (v1 < 0) v1 = 0;
+        if (v1 > 800) v1 = 800;
+        int  pct1 = (pred.fev1_pred > 0.0f)
+                    ? (int)(s_result.fev1 / pred.fev1_pred * 100.0f + 0.5f) : 0;
+        if (pct1 < 0) pct1 = 0;
+        if (pct1 > 999) pct1 = 999;
+        snprintf(dash_buf, sizeof(dash_buf), "%d.%02d L (%d%%)",
+                 v1 / 100, v1 % 100, pct1);
+        if (objects.dash_last_fev1) lv_label_set_text(objects.dash_last_fev1, dash_buf);
     }
     {
-        int v2   = (int)(s_result.fvc * 100.0f + 0.5f); if (v2 > 1000) v2 = 1000;
-        int pct2 = (pred.fvc_pred > 0.0f) ? (int)(s_result.fvc / pred.fvc_pred * 100.0f + 0.5f) : 0;
-        snprintf(buf, sizeof(buf), "%d.%02d L (%d%%)", v2 / 100, v2 % 100, pct2 > 999 ? 999 : pct2);
-        if (objects.dash_last_fvc) lv_label_set_text(objects.dash_last_fvc, buf);
+        char dash_buf[20];
+        int  v2   = (int)(s_result.fvc * 100.0f + 0.5f);
+        if (v2 < 0) v2 = 0;
+        if (v2 > 1000) v2 = 1000;
+        int  pct2 = (pred.fvc_pred > 0.0f)
+                    ? (int)(s_result.fvc / pred.fvc_pred * 100.0f + 0.5f) : 0;
+        if (pct2 < 0) pct2 = 0;
+        if (pct2 > 999) pct2 = 999;
+        snprintf(dash_buf, sizeof(dash_buf), "%d.%02d L (%d%%)",
+                 v2 / 100, v2 % 100, pct2);
+        if (objects.dash_last_fvc) lv_label_set_text(objects.dash_last_fvc, dash_buf);
     }
     { snprintf(buf, sizeof(buf), "Grade %c", s_grade);
       if (objects.dash_last_grade) lv_label_set_text(objects.dash_last_grade, buf); }
@@ -1094,7 +1139,8 @@ static void gui_update_fvl_graph(void)
     float yv[4] = { y_max, y_max * 2.0f / 3.0f, y_max / 3.0f, 0.0f };
     for (int i = 0; i < 4; i++) {
         int v10 = (int)(yv[i] * 10.0f + 0.5f);
-        if (v10 < 0) v10 = 0; if (v10 > 999) v10 = 999;
+        if (v10 < 0)   v10 = 0;
+        if (v10 > 999) v10 = 999;
         if (v10 % 10 == 0) snprintf(buf, sizeof(buf), "%d",    v10 / 10);
         else                snprintf(buf, sizeof(buf), "%d.%d", v10 / 10, v10 % 10);
         lv_label_set_text(objects.fvl_ylabel[i], buf);
@@ -1102,7 +1148,8 @@ static void gui_update_fvl_graph(void)
     float xv[4] = { 0.0f, x_max / 3.0f, x_max * 2.0f / 3.0f, x_max };
     for (int i = 0; i < 4; i++) {
         int v10 = (int)(xv[i] * 10.0f + 0.5f);
-        if (v10 < 0) v10 = 0; if (v10 > 999) v10 = 999;
+        if (v10 < 0)   v10 = 0;
+        if (v10 > 999) v10 = 999;
         if (v10 == 0)          snprintf(buf, sizeof(buf), "0");
         else if (v10 % 10 == 0) snprintf(buf, sizeof(buf), "%d",    v10 / 10);
         else                   snprintf(buf, sizeof(buf), "%d.%d",  v10 / 10, v10 % 10);
@@ -1157,7 +1204,8 @@ static void gui_update_vt_graph(void)
     float yv[4] = { v_max, v_max * 2.0f / 3.0f, v_max / 3.0f, 0.0f };
     for (int i = 0; i < 4; i++) {
         int v10 = (int)(yv[i] * 10.0f + 0.5f);
-        if (v10 < 0) v10 = 0; if (v10 > 999) v10 = 999;
+        if (v10 < 0)   v10 = 0;
+        if (v10 > 999) v10 = 999;
         if (v10 % 10 == 0) snprintf(buf, sizeof(buf), "%d",    v10 / 10);
         else                snprintf(buf, sizeof(buf), "%d.%d", v10 / 10, v10 % 10);
         lv_label_set_text(objects.vt_ylabel[i], buf);
@@ -1165,7 +1213,8 @@ static void gui_update_vt_graph(void)
     float xv[4] = { 0.0f, t_max / 3.0f, t_max * 2.0f / 3.0f, t_max };
     for (int i = 0; i < 4; i++) {
         int v10 = (int)(xv[i] * 10.0f + 0.5f);
-        if (v10 < 0) v10 = 0; if (v10 > 999) v10 = 999;
+        if (v10 < 0)   v10 = 0;
+        if (v10 > 999) v10 = 999;
         if (v10 == 0)          snprintf(buf, sizeof(buf), "0");
         else if (v10 % 10 == 0) snprintf(buf, sizeof(buf), "%d",    v10 / 10);
         else                   snprintf(buf, sizeof(buf), "%d.%d",  v10 / 10, v10 % 10);

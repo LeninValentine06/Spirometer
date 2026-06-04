@@ -138,6 +138,9 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
     lv_timer_handler();
+    ui_tick();          /* drives per-screen tick logic (boot progress bar,
+                           dashboard refresh, …). Without this the boot screen
+                           never finishes and the dashboard is never shown. */
     spiro_process();
     HAL_Delay(2);
 
@@ -147,24 +150,33 @@ int main(void)
      * Comment out this entire block once touch is confirmed working.
      */
     {
-        int16_t tx = 0, ty = 0;
+        int16_t  tx = 0, ty = 0;
+        uint16_t rx = 0, ry = 0;
         bool pressed = xpt2046_get_touch(&tx, &ty);
 
         if (pressed && !was_pressed) {
-            /* New press — log raw calibrated coordinates */
-            LOG("TOUCH PRESS  x=%4d y=%4d", tx, ty);
+            /* New press — log raw AND calibrated coords so the mapping can
+             * be verified: tap the corners and check
+             *   top-left      → screen≈(  0,  0)
+             *   top-right     → screen≈(239,  0)
+             *   bottom-left   → screen≈(  0,319)
+             *   bottom-right  → screen≈(239,319)
+             * If a corner is mirrored/swapped, the axis handling in
+             * xpt2046_get_touch() needs adjusting for this panel. */
+            xpt2046_read_raw_point(&rx, &ry);
+            LOG("TOUCH PRESS  screen=(%4d,%4d) raw=(%4u,%4u)", tx, ty, rx, ry);
             last_logged_x = tx;
             last_logged_y = ty;
             was_pressed = true;
         } else if (pressed && (tx != last_logged_x || ty != last_logged_y)) {
             /* Drag — log only if position changed significantly */
             if (abs(tx - last_logged_x) > 4 || abs(ty - last_logged_y) > 4) {
-                LOG("TOUCH DRAG   x=%4d y=%4d", tx, ty);
+                LOG("TOUCH DRAG   screen=(%4d,%4d)", tx, ty);
                 last_logged_x = tx;
                 last_logged_y = ty;
             }
         } else if (!pressed && was_pressed) {
-            LOG("TOUCH RELEASE x=%4d y=%4d", last_logged_x, last_logged_y);
+            LOG("TOUCH RELEASE screen=(%4d,%4d)", last_logged_x, last_logged_y);
             was_pressed = false;
         }
     }

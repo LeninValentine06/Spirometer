@@ -171,16 +171,21 @@ static void wait_tap(uint16_t *out_raw_x, uint16_t *out_raw_y)
      */
     HAL_Delay(50);
 
-    /* Average readings while finger is held */
+    /* Average readings while finger is held.
+     * Bounded to AVG_MAX_SAMPLES (~0.64 s at 10 ms/sample) so a stuck-low
+     * T_IRQ or a very long press can never spin here forever — the loop
+     * still exits early as soon as the finger lifts (read returns false). */
+    #define AVG_MAX_SAMPLES 64u
     uint32_t sum_x = 0, sum_y = 0, n = 0;
     uint16_t cx, cy;
-    while (xpt2046_read_raw_point(&cx, &cy)) {
+    while (n < AVG_MAX_SAMPLES && xpt2046_read_raw_point(&cx, &cy)) {
         sum_x += cx;
         sum_y += cy;
         n++;
         lv_timer_handler();
         HAL_Delay(10);
     }
+    #undef AVG_MAX_SAMPLES
 
     if (n > 0) {
         *out_raw_x = (uint16_t)(sum_x / n);
